@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from .agent import Agent
 from .config import AppConfig
+from .orchestrator import run_parallel_tasks
 from .providers.registry import get_provider
 from .tools import build_tools
 
@@ -15,6 +16,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Agentic coding CLI with NVIDIA and Kimi K3 provider support.",
     )
     parser.add_argument("prompt", nargs="?", help="Prompt for the coding agent")
+    parser.add_argument("--task", action="append", dest="tasks", help="Additional task prompt (repeatable)")
+    parser.add_argument("--parallel-agents", type=int, default=1, help="Number of agent tasks to run in parallel")
     parser.add_argument("--provider", choices=["nvidia", "kimi-k3"], help="Model provider")
     parser.add_argument("--model", help="Model name override")
     parser.add_argument("--max-output-tokens", type=int, help="Maximum output tokens")
@@ -43,13 +46,38 @@ def _build_direct_messages(prompt: str, image_url: str | None) -> list[dict[str,
     ]
 
 
+def _collect_prompts(prompt: str | None, tasks: list[str] | None) -> list[str]:
+    prompts: list[str] = []
+    if prompt:
+        prompts.append(prompt)
+    if tasks:
+        prompts.extend(task for task in tasks if task)
+    return prompts
+
+
+def _build_agent(config: AppConfig, provider) -> Agent:
+    tools = build_tools(config.workspace)
+    return Agent(
+        provider,
+        model=config.model,
+        max_output_tokens=config.max_output_tokens,
+        temperature=config.temperature,
+        seed=config.seed,
+        reasoning_effort=config.reasoning_effort,
+        tools=tools,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if not args.prompt:
+    prompts = _collect_prompts(args.prompt, args.tasks)
+    if not prompts:
         parser.print_help()
         return 0
+    if args.parallel_agents <= 0:
+        raise SystemExit("--parallel-agents must be positive")
 
     config = AppConfig.from_env()
     if args.provider:
@@ -78,7 +106,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     if args.direct:
-        messages = _build_direct_messages(args.prompt, args.image_url)
+        if len(prompts) != 1:
+            raise SystemExit("--direct mode supports exactly one prompt")
+        messages = _build_direct_messages(prompts[0], args.image_url)
         if args.stream:
             for chunk in provider.stream_text(
                 messages=messages,
@@ -102,15 +132,16 @@ def main(argv: list[str] | None = None) -> int:
             print(message.get("content", ""))
         return 0
 
-    tools = build_tools(config.workspace)
-    agent = Agent(
-        provider,
-        model=config.model,
-        max_output_tokens=config.max_output_tokens,
-        temperature=config.temperature,
-        seed=config.seed,
-        reasoning_effort=config.reasoning_effort,
-        tools=tools,
-    )
-    print(agent.run(args.prompt))
+    def run_prompt(prompt: str) -> str:
+        agent = _build_agent(config, provider)
+        return agent.run(prompt)
+
+    if len(prompts) == 1:
+        print(run_prompt(prompts[0]))
+        return 0
+
+    results = run_parallel_tasks(prompts, run_prompt, max_workers=args.parallel_agents)
+    for result in results:
+        print(f"=== Agent {result.index + 1} ===")
+        print(result.output)
     return 0
