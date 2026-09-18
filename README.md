@@ -4,6 +4,7 @@ A modular, agentic coding CLI scaffold with provider integrations for:
 
 - NVIDIA hosted models (`--provider nvidia`)
 - Kimi K3 (`--provider kimi-k3`)
+- Parallel multi-agent task execution (`--task` + `--parallel-agents`)
 
 ## Key behavior
 
@@ -47,3 +48,13 @@ python -m scode --provider nvidia --direct "Write a production-ready Python CLI 
 ```
 
 Never hardcode API keys in source code; set `NVIDIA_API_KEY` / `KIMI_API_KEY` in your environment.
+
+## Parallel multi-agent mode
+
+Run multiple agent tasks concurrently in one CLI invocation:
+
+```bash
+python -m scode "Plan architecture" --task "Write tests strategy" --task "Suggest rollout checklist" --parallel-agents 3
+```
+
+Each task runs as its own agent workflow and results are printed per agent section.
