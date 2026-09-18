@@ -7,6 +7,7 @@ name = "scode"
 version = "0.1.0"
 description = "Agentic coding CLI with NVIDIA and Kimi K3 provider support"
 requires-python = ">=3.10"
+dependencies = ["requests>=2.31.0"]
 
 [tool.setuptools.packages.find]
 include = ["scode*"]

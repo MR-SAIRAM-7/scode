@@ -22,12 +22,18 @@ class Agent:
         *,
         model: str,
         max_output_tokens: int,
+        temperature: float,
+        seed: int,
+        reasoning_effort: str,
         tools: dict[str, Tool],
         max_steps: int = 12,
     ) -> None:
         self.provider = provider
         self.model = model
         self.max_output_tokens = max_output_tokens
+        self.temperature = temperature
+        self.seed = seed
+        self.reasoning_effort = reasoning_effort
         self.tools = tools
         self.max_steps = max_steps
 
@@ -42,6 +48,9 @@ class Agent:
                 messages=messages,
                 model=self.model,
                 max_output_tokens=self.max_output_tokens,
+                temperature=self.temperature,
+                seed=self.seed,
+                reasoning_effort=self.reasoning_effort,
             )
             content = message.get("content", "")
             messages.append({"role": "assistant", "content": content})

@@ -10,7 +10,7 @@ class _FakeProvider:
     def __init__(self) -> None:
         self.calls = 0
 
-    def complete(self, *, messages, model, max_output_tokens):
+    def complete(self, *, messages, model, max_output_tokens, temperature, seed, reasoning_effort):
         self.calls += 1
         if self.calls == 1:
             return {"content": json.dumps({"type": "tool", "name": "echo", "arguments": {"text": "ok"}})}
@@ -28,6 +28,9 @@ class AgentTests(unittest.TestCase):
             provider,
             model="test-model",
             max_output_tokens=60000,
+            temperature=1.0,
+            seed=0,
+            reasoning_effort="max",
             tools={"echo": type("T", (), {"handler": staticmethod(echo)})()},
         )
 

@@ -28,3 +28,22 @@ Optional overrides:
 - `SCODE_MODEL`
 - `SCODE_MAX_OUTPUT_TOKENS`
 - `SCODE_WORKSPACE`
+- `SCODE_TEMPERATURE`
+- `SCODE_SEED`
+- `SCODE_REASONING_EFFORT`
+
+## NVIDIA/Kimi direct mode (request-style)
+
+Direct mode maps to chat completion requests like NVIDIA's example payloads, including streaming and image URL input:
+
+```bash
+python -m scode --provider nvidia --direct --stream --image-url "https://assets.ngc.nvidia.com/products/api-catalog/phi-3-5-vision/example1b.jpg" "What is in this image?"
+```
+
+For non-streaming direct mode:
+
+```bash
+python -m scode --provider nvidia --direct "Write a production-ready Python CLI skeleton"
+```
+
+Never hardcode API keys in source code; set `NVIDIA_API_KEY` / `KIMI_API_KEY` in your environment.
