@@ -1,79 +1,329 @@
+from __future__ import annotations
+
 import json
-import unittest
-from unittest import mock
+from collections.abc import Iterator
+from typing import Any
 
-from scode.providers.openai_compatible import OpenAICompatibleProvider
+import pytest
+import requests
+
+from scode.errors import AuthError, ProviderError
+from scode.providers.base import AssistantMessage, StreamDone, TextDelta, ToolCall, ToolCallStarted
+from scode.providers.openai_compatible import OpenAICompatibleProvider, ToolsNotSupported
 
 
-class _FakeResponse:
-    def __init__(self, payload=None, lines=None):
-        self._payload = payload or {}
+class FakeResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        body: Any = None,
+        lines: list[str] | None = None,
+        headers: dict[str, str] | None = None,
+        url: str = "https://example.test/v1/chat/completions",
+    ) -> None:
+        self.status_code = status_code
+        self._body = body
         self._lines = lines or []
+        self.headers = headers or {}
+        self.url = url
+        self.closed = False
+        self.text = json.dumps(body) if body is not None else ""
 
-    def raise_for_status(self):
-        return None
+    def json(self) -> Any:
+        if self._body is None:
+            raise ValueError("no json")
+        return self._body
 
-    def json(self):
-        return self._payload
-
-    def iter_lines(self):
+    def iter_lines(self, decode_unicode: bool = False) -> Iterator[bytes]:
         for line in self._lines:
-            yield line
+            yield line.encode("utf-8")
 
-    def __enter__(self):
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> FakeResponse:
         return self
 
-    def __exit__(self, exc_type, exc, tb):
-        return False
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
 
-class ProviderTests(unittest.TestCase):
-    def test_complete_sends_expected_payload(self) -> None:
-        provider = OpenAICompatibleProvider(name="nvidia", api_key="k", base_url="https://example.com/v1")
-        captured = {}
+def sse(payload: dict[str, Any]) -> str:
+    return "data: " + json.dumps(payload)
 
-        def fake_post(url, headers, json, timeout, **kwargs):
-            captured["url"] = url
-            captured["headers"] = headers
-            captured["json"] = json
-            captured["kwargs"] = kwargs
-            return _FakeResponse(payload={"choices": [{"message": {"content": "ok"}}]})
 
-        with mock.patch("scode.providers.openai_compatible.requests.post", side_effect=fake_post):
-            message = provider.complete(
-                messages=[{"role": "user", "content": "hello"}],
-                model="moonshotai/kimi-k3",
-                max_output_tokens=60000,
-                temperature=1.0,
-                seed=0,
-                reasoning_effort="max",
-            )
+def make_provider(responses: list[FakeResponse], monkeypatch: pytest.MonkeyPatch) -> OpenAICompatibleProvider:
+    provider = OpenAICompatibleProvider(
+        name="test",
+        api_key="nvapi-test",
+        base_url="https://example.test/v1",
+        model="test/model",
+    )
+    queue = list(responses)
+    calls: list[dict[str, Any]] = []
 
-        self.assertEqual(message["content"], "ok")
-        self.assertEqual(captured["url"], "https://example.com/v1/chat/completions")
-        self.assertEqual(captured["headers"]["Accept"], "application/json")
-        self.assertEqual(captured["json"]["stream"], False)
-        self.assertEqual(captured["json"]["max_tokens"], 60000)
-        self.assertEqual(captured["json"]["reasoning_effort"], "max")
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append({"url": url, **kwargs})
+        return queue.pop(0)
 
-    def test_stream_text_reads_sse_events(self) -> None:
-        provider = OpenAICompatibleProvider(name="nvidia", api_key="k", base_url="https://example.com/v1")
-        lines = [
-            b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}",
-            b"data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}",
-            b"data: [DONE]",
-        ]
+    monkeypatch.setattr(provider.session, "post", fake_post)
+    provider.__dict__["_calls"] = calls
+    return provider
 
-        with mock.patch("scode.providers.openai_compatible.requests.post", return_value=_FakeResponse(lines=lines)):
-            output = "".join(
-                provider.stream_text(
-                    messages=[{"role": "user", "content": "hello"}],
-                    model="moonshotai/kimi-k3",
-                    max_output_tokens=60000,
-                    temperature=1.0,
-                    seed=0,
-                    reasoning_effort="max",
-                )
-            )
 
-        self.assertEqual(output, "Hello world")
+# ------------------------------------------------------------------ payload
+
+def test_payload_includes_tools_and_stream_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = make_provider([FakeResponse(lines=["data: [DONE]"])], monkeypatch)
+    tools = [{"type": "function", "function": {"name": "Read", "parameters": {}}}]
+    list(provider.stream([{"role": "user", "content": "hi"}], tools=tools))
+
+    payload = provider.__dict__["_calls"][0]["json"]
+    assert payload["model"] == "test/model"
+    assert payload["stream"] is True
+    assert payload["stream_options"] == {"include_usage": True}
+    assert payload["tools"] == tools
+    assert payload["tool_choice"] == "auto"
+
+
+def test_tools_are_omitted_when_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = make_provider([FakeResponse(lines=["data: [DONE]"])], monkeypatch)
+    provider.supports_tools = False
+    list(provider.stream([{"role": "user", "content": "hi"}], tools=[{"x": 1}]))
+    assert "tools" not in provider.__dict__["_calls"][0]["json"]
+
+
+# ----------------------------------------------------------------- streaming
+
+def test_stream_collects_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        sse({"choices": [{"delta": {"content": "Hel"}}]}),
+        sse({"choices": [{"delta": {"content": "lo"}}]}),
+        sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+        "data: [DONE]",
+    ]
+    provider = make_provider([FakeResponse(lines=lines)], monkeypatch)
+    events = list(provider.stream([{"role": "user", "content": "hi"}]))
+
+    deltas = [e.text for e in events if isinstance(e, TextDelta)]
+    assert deltas == ["Hel", "lo"]
+    done = events[-1]
+    assert isinstance(done, StreamDone)
+    assert done.message.content == "Hello"
+    assert done.message.finish_reason == "stop"
+
+
+def test_stream_ignores_comments_and_blank_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        "",
+        ": keep-alive",
+        "event: ping",
+        sse({"choices": [{"delta": {"content": "ok"}}]}),
+        "data: [DONE]",
+    ]
+    provider = make_provider([FakeResponse(lines=lines)], monkeypatch)
+    done = list(provider.stream([{"role": "user", "content": "x"}]))[-1]
+    assert isinstance(done, StreamDone)
+    assert done.message.content == "ok"
+
+
+def test_stream_survives_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        "data: {not json}",
+        sse({"choices": [{"delta": {"content": "fine"}}]}),
+        "data: [DONE]",
+    ]
+    provider = make_provider([FakeResponse(lines=lines)], monkeypatch)
+    done = list(provider.stream([{"role": "user", "content": "x"}]))[-1]
+    assert done.message.content == "fine"
+
+
+def test_stream_assembles_tool_calls_across_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        sse({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_a", "function": {"name": "Read", "arguments": '{"file'}}
+        ]}}]}),
+        sse({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": '_path": "a.py"}'}}
+        ]}}]}),
+        sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        "data: [DONE]",
+    ]
+    provider = make_provider([FakeResponse(lines=lines)], monkeypatch)
+    events = list(provider.stream([{"role": "user", "content": "x"}]))
+
+    assert any(isinstance(e, ToolCallStarted) and e.name == "Read" for e in events)
+    message = events[-1].message
+    assert len(message.tool_calls) == 1
+    call = message.tool_calls[0]
+    assert call.id == "call_a"
+    assert call.name == "Read"
+    assert call.arguments == {"file_path": "a.py"}
+
+
+def test_stream_handles_parallel_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        sse({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c0", "function": {"name": "Read", "arguments": '{"file_path":"a"}'}},
+            {"index": 1, "id": "c1", "function": {"name": "LS", "arguments": "{}"}},
+        ]}}]}),
+        "data: [DONE]",
+    ]
+    provider = make_provider([FakeResponse(lines=lines)], monkeypatch)
+    message = list(provider.stream([{"role": "user", "content": "x"}]))[-1].message
+    assert [c.name for c in message.tool_calls] == ["Read", "LS"]
+
+
+def test_stream_captures_reasoning_and_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        sse({"choices": [{"delta": {"reasoning_content": "thinking..."}}]}),
+        sse({"choices": [{"delta": {"content": "answer"}}]}),
+        sse({"choices": [], "usage": {"prompt_tokens": 120, "completion_tokens": 8,
+                                      "prompt_tokens_details": {"cached_tokens": 40}}}),
+        "data: [DONE]",
+    ]
+    provider = make_provider([FakeResponse(lines=lines)], monkeypatch)
+    message = list(provider.stream([{"role": "user", "content": "x"}]))[-1].message
+    assert message.reasoning == "thinking..."
+    assert message.input_tokens == 120
+    assert message.output_tokens == 8
+    assert message.cached_tokens == 40
+
+
+def test_stream_handles_content_parts(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        sse({"choices": [{"delta": {"content": [{"type": "text", "text": "part"}]}}]}),
+        "data: [DONE]",
+    ]
+    provider = make_provider([FakeResponse(lines=lines)], monkeypatch)
+    assert list(provider.stream([{"role": "user", "content": "x"}]))[-1].message.content == "part"
+
+
+def test_usage_is_estimated_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [sse({"choices": [{"delta": {"content": "hello there"}}]}), "data: [DONE]"]
+    provider = make_provider([FakeResponse(lines=lines)], monkeypatch)
+    message = list(provider.stream([{"role": "user", "content": "x" * 400}]))[-1].message
+    assert message.input_tokens > 0
+    assert message.output_tokens > 0
+
+
+# -------------------------------------------------------------- completion
+
+def test_complete_parses_a_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = {
+        "choices": [{
+            "message": {
+                "content": "done",
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "Read", "arguments": '{"file_path":"a.py"}'}}
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+    }
+    provider = make_provider([FakeResponse(body=body)], monkeypatch)
+    message = provider.complete([{"role": "user", "content": "x"}])
+
+    assert message.content == "done"
+    assert message.tool_calls[0].arguments == {"file_path": "a.py"}
+    assert message.input_tokens == 10
+
+
+def test_complete_rejects_an_empty_choice_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = make_provider([FakeResponse(body={"choices": []})], monkeypatch)
+    with pytest.raises(ProviderError, match="no choices"):
+        provider.complete([{"role": "user", "content": "x"}])
+
+
+# ------------------------------------------------------------------- errors
+
+def test_401_becomes_an_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = FakeResponse(status_code=401, body={"error": {"message": "bad key"}})
+    provider = make_provider([response], monkeypatch)
+    with pytest.raises(AuthError, match="rejected the API key"):
+        provider.complete([{"role": "user", "content": "x"}])
+
+
+def test_404_mentions_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = make_provider([FakeResponse(status_code=404, body={"detail": "nope"})], monkeypatch)
+    with pytest.raises(ProviderError, match="was not found"):
+        provider.complete([{"role": "user", "content": "x"}])
+
+
+def test_400_about_tools_signals_no_tool_support(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = FakeResponse(
+        status_code=400, body={"error": {"message": "tools are not supported for this model"}}
+    )
+    provider = make_provider([response], monkeypatch)
+    with pytest.raises(ToolsNotSupported):
+        provider.complete([{"role": "user", "content": "x"}], tools=[{"type": "function"}])
+    assert provider.supports_tools is False
+
+
+def test_retries_on_429_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("scode.providers.openai_compatible.time.sleep", lambda _s: None)
+    responses = [
+        FakeResponse(status_code=429, headers={"Retry-After": "0"}),
+        FakeResponse(body={"choices": [{"message": {"content": "ok"}}]}),
+    ]
+    provider = make_provider(responses, monkeypatch)
+    assert provider.complete([{"role": "user", "content": "x"}]).content == "ok"
+    assert responses[0].closed is True
+
+
+def test_connection_errors_are_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = OpenAICompatibleProvider(
+        name="t", api_key="k", base_url="https://example.test/v1", model="m"
+    )
+
+    def boom(*args: Any, **kwargs: Any):
+        raise requests.ConnectionError("no route to host")
+
+    monkeypatch.setattr(provider.session, "post", boom)
+    with pytest.raises(ProviderError, match="Could not reach"):
+        provider.complete([{"role": "user", "content": "x"}])
+
+
+def test_list_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = OpenAICompatibleProvider(
+        name="t", api_key="k", base_url="https://example.test/v1", model="m"
+    )
+    monkeypatch.setattr(
+        provider.session,
+        "get",
+        lambda url, **kwargs: FakeResponse(body={"data": [{"id": "b/model"}, {"id": "a/model"}]}),
+    )
+    monkeypatch.setattr(FakeResponse, "raise_for_status", lambda self: None, raising=False)
+    assert provider.list_models() == ["a/model", "b/model"]
+
+
+# ------------------------------------------------------------- tool parsing
+
+def test_tool_call_from_raw_handles_bad_json() -> None:
+    call = ToolCall.from_raw("id", "Read", "{oops")
+    assert call.parse_error
+    assert call.arguments == {}
+
+
+def test_tool_call_from_raw_rejects_non_objects() -> None:
+    call = ToolCall.from_raw("id", "Read", "[1, 2]")
+    assert "must be a JSON object" in (call.parse_error or "")
+
+
+def test_tool_call_empty_arguments() -> None:
+    call = ToolCall.from_raw("id", "LS", "")
+    assert call.arguments == {}
+    assert call.parse_error is None
+
+
+def test_assistant_message_serialises_tool_calls() -> None:
+    message = AssistantMessage(
+        content="hi",
+        tool_calls=[ToolCall(id="c1", name="Read", raw_arguments='{"file_path":"a"}')],
+    )
+    payload = message.to_message()
+    assert payload["role"] == "assistant"
+    assert payload["tool_calls"][0]["function"]["name"] == "Read"
+    assert payload["tool_calls"][0]["type"] == "function"

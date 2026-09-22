@@ -4,10 +4,53 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scode"
-version = "0.1.0"
-description = "Agentic coding CLI with NVIDIA and Kimi K3 provider support"
+version = "1.0.0"
+description = "Agentic coding CLI powered by NVIDIA NIM models"
+readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["requests>=2.31.0"]
+license = { text = "MIT" }
+authors = [{ name = "MR-SAIRAM-7" }]
+keywords = ["cli", "agent", "coding-assistant", "nvidia", "nim", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Code Generators",
+]
+dependencies = [
+    "requests>=2.31.0",
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.36",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "ruff>=0.4"]
+
+[project.urls]
+Homepage = "https://github.com/MR-SAIRAM-7/scode"
+Issues = "https://github.com/MR-SAIRAM-7/scode/issues"
+
+[project.scripts]
+scode = "scode.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["scode*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008"]
