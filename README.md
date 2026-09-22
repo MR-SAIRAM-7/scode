@@ -27,39 +27,82 @@ Added a retry loop with a timeout to `src/client.py:42`. Tests pass.
 
 ## Install
 
+Requires Python 3.10 or newer. Installs `requests`, `rich` and `prompt_toolkit`.
+
 ```bash
 git clone https://github.com/MR-SAIRAM-7/scode.git
 cd scode
 pip install -e .
 ```
 
-Requires Python 3.10+. Installs `requests`, `rich` and `prompt_toolkit`.
-
 ## Set up a key
 
 NVIDIA gives free credits at [build.nvidia.com](https://build.nvidia.com). Your key looks
-like `nvapi-...`.
+like `nvapi-...`. Keep it out of your shell history and out of any file you commit.
 
-```bash
-export NVIDIA_API_KEY=nvapi-your-key-here
-```
-
-On Windows PowerShell:
+**Windows (PowerShell)** — for this terminal only:
 
 ```powershell
 $env:NVIDIA_API_KEY = "nvapi-your-key-here"
 ```
 
-Or start `scode` and run `/login`, which stores the key in `~/.scode/settings.json`.
+To set it permanently, then **open a new terminal** (`setx` does not affect the one you
+run it in):
 
-Check everything is wired up, and see which models your key can actually reach:
+```powershell
+setx NVIDIA_API_KEY "nvapi-your-key-here"
+```
+
+**macOS / Linux** — add it to `~/.bashrc` or `~/.zshrc` to make it permanent:
+
+```bash
+export NVIDIA_API_KEY=nvapi-your-key-here
+```
+
+Or skip all of that: start scode and run `/login`, which stores the key in
+`~/.scode/settings.json`.
+
+## Run it
+
+**scode works on whatever directory you start it in**, so `cd` into the project you want
+to work on first. Starting it in your home folder points it at your entire user profile.
+
+```bash
+cd path/to/your/project
+scode
+```
+
+If `scode` is not found, use the module form, which always works:
+
+```bash
+python -m scode
+```
+
+<details>
+<summary>Windows: getting the short <code>scode</code> command</summary>
+
+`pip install` puts `scode.exe` in your Python user scripts folder, which is often not on
+`PATH`. pip warns about this during install. Either use `python -m scode`, or add the
+folder (adjust the Python version to match yours) and open a new terminal:
+
+```powershell
+setx PATH "$env:PATH;$env:APPDATA\Python\Python314\Scripts"
+```
+
+</details>
+
+Check the install and see which models your key can actually reach — worth doing once,
+because NVIDIA's catalog lists far more models than it grants:
 
 ```bash
 scode --doctor
+```
+
+```bash
 scode --check-models
 ```
 
-## Use it
+### Ways to start it
 
 ```bash
 scode                                  # interactive session in the current directory
@@ -68,6 +111,17 @@ scode -p "what does src/app.py do?"    # one-shot, prints and exits
 scode -c                               # continue the last session here
 scode --permission-mode plan           # research and propose, change nothing
 ```
+
+If you have not used a tool like this before, start in plan mode. It reads and proposes
+but cannot change a single file, so you can see how it behaves on a repo you care about
+before letting it edit.
+
+### What to expect
+
+- It **asks before every edit and shell command**. Press `1` to allow once, `2` to allow
+  that kind of command from now on, `3` to refuse and tell it what to do instead.
+- On a slow model you may see `Empty response from the model; retrying` — that is
+  NVIDIA's gateway hiccuping, and scode recovering from it. Not an error.
 
 Inside a session:
 
