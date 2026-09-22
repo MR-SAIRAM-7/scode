@@ -165,9 +165,12 @@ def _cost(repl: Repl, args: str) -> CommandResult:
 
 # -------------------------------------------------------------------- model
 
-@command("model", "Show or change the model", usage="[name|--all|--search TEXT]")
+@command("model", "Show or change the model", usage="[name|--check|--all|--search TEXT]")
 def _model(repl: Repl, args: str) -> CommandResult:
     arg = args.strip()
+
+    if arg in {"--check", "-c"}:
+        return _model_check(repl)
 
     if arg in {"--all", "--list", "-a"} or arg.startswith("--search"):
         query = arg.partition(" ")[2].strip().lower() if arg.startswith("--search") else ""
@@ -186,6 +189,10 @@ def _model(repl: Repl, args: str) -> CommandResult:
             title=f"{len(models)} models at {repl.settings.base_url}",
         )
         repl.ui.muted("Set one with /model <name>")
+        repl.ui.warn(
+            "This is the public catalog; most entries are not granted to any one key. "
+            "Run /model --check to see which ones actually answer."
+        )
         repl.ui.blank()
         return CommandResult()
 
@@ -195,13 +202,70 @@ def _model(repl: Repl, args: str) -> CommandResult:
             marker = " (current)" if name == repl.settings.model else ""
             rows.append([name + marker, str(info["label"]), str(info["note"])])
         repl.ui.blank()
-        repl.ui.table(["model", "name", "notes"], rows, title="recommended models")
-        repl.ui.muted("Change with /model <name>  ·  see everything with /model --all")
+        repl.ui.table(["model", "name", "notes"], rows, title="verified models")
+        repl.ui.muted(
+            "Change with /model <name>  ·  /model --check probes your key  ·  "
+            "/model --all lists the full catalog"
+        )
         repl.ui.blank()
         return CommandResult()
 
+    note = C.KNOWN_UNAVAILABLE.get(arg)
+    if note:
+        repl.ui.warn(f"{arg} is known not to work: {note}.")
     repl.set_model(arg)
     repl.ui.success(f"Model set to {arg}")
+    return CommandResult()
+
+
+def _model_check(repl: Repl) -> CommandResult:
+    """Probe each candidate model so the user sees what their key can reach."""
+    from ..providers.openai_compatible import check_model
+
+    if not repl.settings.api_key:
+        repl.ui.error("No API key set. Run /login first.")
+        return CommandResult()
+
+    candidates = list(C.MODEL_CATALOG)
+    for extra in (repl.settings.model, repl.settings.small_model):
+        if extra and extra not in candidates:
+            candidates.append(extra)
+
+    marks = {
+        "ok": ("scode.success", "works"),
+        "unavailable": ("scode.warn", "not on your key"),
+        "retired": ("scode.warn", "retired"),
+        "timeout": ("scode.error", "no response"),
+        "error": ("scode.error", "error"),
+    }
+
+    rows: list[list[str]] = []
+    working: list[str] = []
+    repl.ui.blank()
+    with repl.ui.status("Probing models") as status:
+        for name in candidates:
+            if status is not None:
+                status.update(f"Probing {name}")
+            state, detail = check_model(
+                repl.settings.base_url, repl.settings.api_key, name
+            )
+            if state == "ok":
+                working.append(name)
+            label = marks.get(state, ("scode.muted", state))[1]
+            current = " (current)" if name == repl.settings.model else ""
+            rows.append([name + current, label, detail])
+
+    repl.ui.table(["model", "status", "detail"], rows, title="model availability")
+    if working:
+        repl.ui.success(f"{len(working)} of {len(candidates)} models responded.")
+        if repl.settings.model not in working:
+            repl.ui.warn(
+                f"Your current model ({repl.settings.model}) is not responding. "
+                f"Switch with: /model {working[0]}"
+            )
+    else:
+        repl.ui.error("No models responded. Check your key and network.")
+    repl.ui.blank()
     return CommandResult()
 
 

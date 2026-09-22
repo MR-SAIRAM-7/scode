@@ -140,7 +140,11 @@ class PermissionEngine:
             return False, "Blocked by a deny rule in your settings."
 
         if self.asker is None:
-            return False, "No approval prompt available (non-interactive); denied by default."
+            return False, (
+                f"{request.tool} is disabled in this non-interactive session, because "
+                "there is nobody to approve it. Do not try this call again. Finish with "
+                "what you already have, and say plainly what you could not do."
+            )
 
         answer, rule_text = self.asker(request)
         if answer is Answer.NO:

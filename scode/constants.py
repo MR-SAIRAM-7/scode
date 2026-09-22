@@ -35,77 +35,69 @@ ALT_MEMORY_FILES = ("CLAUDE.md", "AGENTS.md")
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 DEFAULT_PROVIDER = "nvidia"
-DEFAULT_MODEL = "moonshotai/kimi-k3"
-DEFAULT_SMALL_MODEL = "nvidia/nemotron-nano-3-30b-a3b"
+# Verified against the live NVIDIA endpoint: responds in ~1s and supports
+# function calling. Run `/model --check` to see what your own key can reach —
+# the public catalog lists far more models than any one account is granted.
+DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+DEFAULT_SMALL_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 
 DEFAULT_MAX_OUTPUT_TOKENS = 32_000
 DEFAULT_TEMPERATURE = 0.6
 DEFAULT_CONTEXT_WINDOW = 128_000
 DEFAULT_MAX_STEPS = 60
 
-# Curated shortlist shown by `/model`. `/model --all` queries the live catalog,
-# so this list never has to be exhaustive.
+# Models verified working against the live NVIDIA endpoint, with the measured
+# time to first token. Availability is per-account and changes over time, so
+# `/model --check` probes for real rather than trusting this list.
 MODEL_CATALOG: dict[str, dict[str, object]] = {
-    "moonshotai/kimi-k3": {
-        "label": "Kimi K3",
-        "context": 256_000,
-        "tools": True,
-        "note": "Strong agentic coder. Default.",
-    },
-    "moonshotai/kimi-k2.6": {
-        "label": "Kimi K2.6",
-        "context": 128_000,
-        "tools": True,
-        "note": "Previous Kimi generation.",
-    },
-    "deepseek-ai/deepseek-v4.1-flash": {
-        "label": "DeepSeek V4.1 Flash",
-        "context": 128_000,
-        "tools": True,
-        "note": "Fast, low latency.",
-    },
-    "z-ai/glm-5.3": {
-        "label": "GLM 5.3",
-        "context": 128_000,
-        "tools": True,
-        "note": "Solid general coder.",
-    },
-    "z-ai/glm-5.3-flash": {
-        "label": "GLM 5.3 Flash",
-        "context": 128_000,
-        "tools": True,
-        "note": "Speed-tuned GLM.",
-    },
     "nvidia/nemotron-3-super-120b-a12b": {
         "label": "Nemotron 3 Super 120B",
         "context": 128_000,
         "tools": True,
-        "note": "NVIDIA flagship MoE.",
+        "note": "Flagship MoE, ~1s to first token. Default.",
     },
     "nvidia/nemotron-3-ultra-550b-a55b": {
         "label": "Nemotron 3 Ultra 550B",
         "context": 128_000,
         "tools": True,
-        "note": "Largest Nemotron.",
+        "note": "Largest Nemotron; slower (~19s) but strongest.",
     },
-    "nvidia/nemotron-nano-3-30b-a3b": {
-        "label": "Nemotron Nano 3 30B",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {
+        "label": "Nemotron 3 Nano Omni 30B",
         "context": 128_000,
         "tools": True,
-        "note": "Cheap/fast; good for summaries.",
+        "note": "Fast and cheap; used for summarising.",
     },
     "openai/gpt-oss-20b": {
         "label": "GPT-OSS 20B",
         "context": 128_000,
         "tools": True,
-        "note": "Open-weight GPT.",
+        "note": "Open-weight GPT with reasoning.",
     },
-    "meta/llama-3.3-70b-instruct": {
-        "label": "Llama 3.3 70B",
+    "poolside/laguna-xs-2.1": {
+        "label": "Laguna XS 2.1",
         "context": 128_000,
         "tools": True,
-        "note": "Meta general purpose.",
+        "note": "Small coding model, no reasoning trace.",
     },
+    "meta/llama-3.2-11b-vision-instruct": {
+        "label": "Llama 3.2 11B Vision",
+        "context": 128_000,
+        "tools": True,
+        "note": "Multimodal; accepts image_url content.",
+    },
+}
+
+# Models whose gateway hangs or that are commonly ungranted. Named in errors so
+# the failure is explained rather than just slow.
+KNOWN_UNAVAILABLE = {
+    "moonshotai/kimi-k3": "the gateway returns 504 after ~5 minutes",
+    "moonshotai/kimi-k2.6": "not granted to most accounts",
+    "deepseek-ai/deepseek-v4.1-flash": "the gateway times out",
+    "z-ai/glm-5.3": "the gateway times out",
+    "z-ai/glm-5.3-flash": "the gateway times out",
+    "nvidia/nemotron-nano-3-30b-a3b": "not granted to most accounts",
+    "meta/llama-3.3-70b-instruct": "reached end of life on 2026-08-26",
 }
 
 

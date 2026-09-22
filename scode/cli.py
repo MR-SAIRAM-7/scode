@@ -70,6 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     info = parser.add_argument_group("information")
     info.add_argument("--version", action="store_true", help="Print the version and exit")
     info.add_argument("--list-models", action="store_true", help="List provider models and exit")
+    info.add_argument("--check-models", action="store_true",
+                      help="Probe which models your key can actually reach, then exit")
     info.add_argument("--sessions", action="store_true", help="List saved sessions and exit")
     info.add_argument("--doctor", action="store_true", help="Check the environment and exit")
     return parser
@@ -138,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list_models:
         return _list_models(settings, ui)
+    if args.check_models:
+        return _check_models(settings, ui)
     if args.sessions:
         return _list_sessions(settings, ui)
     if args.doctor:
@@ -288,6 +292,49 @@ def _list_models(settings: Settings, ui: UI) -> int:
     for model in models:
         marker = "*" if model == settings.model else " "
         print(f"{marker} {model}")
+    return 0
+
+
+def _check_models(settings: Settings, ui: UI) -> int:
+    """Probe each candidate model. The catalog lists far more than a key can use."""
+    from .providers.openai_compatible import check_model
+
+    if not settings.api_key:
+        ui.error("No API key set. Export NVIDIA_API_KEY first.")
+        return 2
+
+    candidates = list(C.MODEL_CATALOG)
+    for extra in (settings.model, settings.small_model):
+        if extra and extra not in candidates:
+            candidates.append(extra)
+
+    labels = {
+        "ok": "works",
+        "unavailable": "not on your key",
+        "retired": "retired",
+        "timeout": "no response",
+        "error": "error",
+    }
+    rows: list[list[str]] = []
+    working: list[str] = []
+    with ui.status("Probing models") as status:
+        for name in candidates:
+            if status is not None:
+                status.update(f"Probing {name}")
+            state, detail = check_model(settings.base_url, settings.api_key, name)
+            if state == "ok":
+                working.append(name)
+            current = " (current)" if name == settings.model else ""
+            rows.append([name + current, labels.get(state, state), detail])
+
+    ui.table(["model", "status", "detail"], rows, title="model availability")
+    if not working:
+        ui.error("No models responded. Check your key and network.")
+        return 1
+    ui.success(f"{len(working)} of {len(candidates)} models responded.")
+    if settings.model not in working:
+        ui.warn(f"{settings.model} is not responding. Try: scode --model {working[0]}")
+        return 1
     return 0
 
 

@@ -52,10 +52,11 @@ $env:NVIDIA_API_KEY = "nvapi-your-key-here"
 
 Or start `scode` and run `/login`, which stores the key in `~/.scode/settings.json`.
 
-Check everything is wired up:
+Check everything is wired up, and see which models your key can actually reach:
 
 ```bash
 scode --doctor
+scode --check-models
 ```
 
 ## Use it
@@ -85,7 +86,8 @@ exit, `Up`/`Down` for history, `Tab` to complete commands and file paths.
 | Command | What it does |
 | --- | --- |
 | `/help` | list commands |
-| `/model [name]` | show or change the model; `/model --all` lists the live catalog |
+| `/model [name]` | show or change the model |
+| `/model --check` | probe which models your key can actually reach |
 | `/mode [name]` | change how tool calls are approved |
 | `/status` | session, model, context and token status |
 | `/cost` | token usage for the session |
@@ -161,15 +163,38 @@ Run `/init` to have scode read the codebase and write one for you.
 
 ## Models
 
-The default is `moonshotai/kimi-k3`. `/model` shows a shortlist; `/model --all` queries
-NVIDIA's live catalog. Any model that supports function calling works well; for one that
-does not, scode detects the rejection and falls back to a text-based tool protocol
-automatically.
+The default is `nvidia/nemotron-3-super-120b-a12b`.
+
+**NVIDIA's public catalog lists far more models than any one key can use.** Of the ~60
+chat models it advertises, a typical free key can reach under ten: the rest return
+404 ("not granted to this account"), 410 (retired), or simply never answer. So the
+catalog is not a menu — probe it:
 
 ```bash
-scode --model nvidia/nemotron-3-super-120b-a12b
+scode --check-models      # or /model --check inside a session
+```
+
+```
+model                                          status       detail
+nvidia/nemotron-3-super-120b-a12b (current)    works        0.5s
+nvidia/nemotron-3-ultra-550b-a55b              works        1.7s
+nvidia/nemotron-3-nano-omni-30b-a3b-reasoning  works        0.3s
+openai/gpt-oss-20b                             works        5.2s
+poolside/laguna-xs-2.1                         works        1.1s
+```
+
+`/model` lists models verified working; `/model --all` dumps the full catalog with a
+warning. Models that support function calling are used natively; for one that does not,
+scode detects the rejection and falls back to a text-based tool protocol automatically.
+
+```bash
+scode --model nvidia/nemotron-3-ultra-550b-a55b
 scode --list-models
 ```
+
+Notably `moonshotai/kimi-k3`, `z-ai/glm-5.3` and `deepseek-ai/deepseek-v4.1-flash` appear
+in the catalog but their gateways time out — scode names them explicitly rather than
+hanging.
 
 ## Configuration
 
@@ -182,7 +207,7 @@ Settings merge in this order, later winning: user file → project file → proj
 
 ```json
 {
-  "model": "moonshotai/kimi-k3",
+  "model": "nvidia/nemotron-3-super-120b-a12b",
   "temperature": 0.6,
   "max_output_tokens": 32000,
   "auto_compact": true,

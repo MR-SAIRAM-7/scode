@@ -6,7 +6,7 @@ models. Pure Python, no framework.
 ## Commands
 
 ```bash
-pytest                          # full suite (337 tests)
+pytest                          # full suite (351 tests)
 pytest tests/test_agent.py -q   # one file
 ruff check scode tests          # lint
 ruff check scode tests --fix    # autofix
@@ -64,6 +64,15 @@ There is no build step. `scode` is installed as a console script via
   Printing in both places duplicated it once already.
 - **Interactive mode must not read stdin as a prompt.** Only `-p` consumes piped stdin;
   in the REPL, stdin is the command stream.
+- **The model sometimes returns a 200 with an empty body** (no content, no tool calls).
+  That is not an answer: `_loop` retries up to `MAX_EMPTY_TURNS` and never appends the
+  empty message. Treating it as "done" made scode exit 0 having silently done nothing.
+- **The NVIDIA catalog is not an availability list.** `/v1/models` advertises models the
+  account cannot call (404), that are retired (410), or whose gateway hangs (504 after
+  ~5 minutes). `constants.MODEL_CATALOG` holds only verified ones and `KNOWN_UNAVAILABLE`
+  explains the common failures; `check_model()` is the authoritative probe.
+- **502/503/504 are retried only once.** A wedged gateway answers only after the full read
+  timeout, so the normal retry budget would hang for many minutes.
 
 ## Testing
 

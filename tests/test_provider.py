@@ -246,10 +246,62 @@ def test_401_becomes_an_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
         provider.complete([{"role": "user", "content": "x"}])
 
 
-def test_404_mentions_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_404_says_the_model_is_not_on_this_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NVIDIA returns 404 for catalog models an account was never granted."""
     provider = make_provider([FakeResponse(status_code=404, body={"detail": "nope"})], monkeypatch)
-    with pytest.raises(ProviderError, match="was not found"):
+    with pytest.raises(ProviderError, match="not available on your account"):
         provider.complete([{"role": "user", "content": "x"}])
+
+
+def test_410_reports_a_retired_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = {"detail": "The model has reached its end of life on 2026-08-26"}
+    provider = make_provider([FakeResponse(status_code=410, body=body)], monkeypatch)
+    with pytest.raises(ProviderError, match="retired by NVIDIA"):
+        provider.complete([{"role": "user", "content": "x"}])
+
+
+def test_504_is_retried_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged gateway answers only after the full read timeout."""
+    monkeypatch.setattr("scode.providers.openai_compatible.time.sleep", lambda _s: None)
+    responses = [FakeResponse(status_code=504) for _ in range(4)]
+    provider = make_provider(responses, monkeypatch)
+    with pytest.raises(ProviderError, match="did not respond"):
+        provider.complete([{"role": "user", "content": "x"}])
+    # Two attempts, not the full retry budget.
+    assert len(provider.__dict__["_calls"]) == 2
+
+
+def test_known_bad_models_explain_themselves(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("scode.providers.openai_compatible.time.sleep", lambda _s: None)
+    provider = make_provider([FakeResponse(status_code=504) for _ in range(2)], monkeypatch)
+    provider.model = "moonshotai/kimi-k3"
+    with pytest.raises(ProviderError, match="504 after"):
+        provider.complete([{"role": "user", "content": "x"}])
+
+
+def test_check_model_classifies_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scode.providers.openai_compatible import check_model
+
+    cases = {200: "ok", 404: "unavailable", 410: "retired", 401: "error", 500: "error"}
+    for status, expected in cases.items():
+        monkeypatch.setattr(
+            "scode.providers.openai_compatible.requests.post",
+            lambda *a, _s=status, **k: FakeResponse(status_code=_s, lines=["data: {}"]),
+        )
+        state, _ = check_model("https://x.test/v1", "k", "m/model")
+        assert state == expected, f"{status} -> {state}"
+
+
+def test_check_model_reports_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scode.providers.openai_compatible import check_model
+
+    def boom(*a, **k):
+        raise requests.Timeout("slow")
+
+    monkeypatch.setattr("scode.providers.openai_compatible.requests.post", boom)
+    state, detail = check_model("https://x.test/v1", "k", "m/model")
+    assert state == "timeout"
+    assert "no response" in detail
 
 
 def test_400_about_tools_signals_no_tool_support(monkeypatch: pytest.MonkeyPatch) -> None:

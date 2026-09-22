@@ -23,9 +23,22 @@ from .base import (
 )
 
 CONNECT_TIMEOUT = 20
-READ_TIMEOUT = 300
+# Applies to each socket read, so for a stream this is the budget for the first
+# token. Working models answer in under 25s; a model whose gateway is wedged
+# never answers at all, so waiting longer only delays the error.
+READ_TIMEOUT = 180
 MAX_RETRIES = 4
 RETRY_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
+# A wedged upstream returns these only after the full read timeout, so retrying
+# three more times would hang for many minutes. One retry is enough.
+SLOW_FAILURE_STATUSES = {502, 503, 504}
+MAX_SLOW_FAILURE_ATTEMPTS = 2
+
+
+def _unavailable_note(model: str) -> str:
+    from ..constants import KNOWN_UNAVAILABLE
+
+    return KNOWN_UNAVAILABLE.get(model, "")
 
 
 def _sleep_for(attempt: int, retry_after: str | None) -> float:
@@ -100,6 +113,7 @@ class OpenAICompatibleProvider:
 
     def _post(self, payload: dict[str, Any], *, stream: bool) -> requests.Response:
         last_error: Exception | None = None
+        timeouts = 0
         for attempt in range(MAX_RETRIES):
             try:
                 response = self.session.post(
@@ -111,10 +125,15 @@ class OpenAICompatibleProvider:
                 )
             except requests.Timeout as exc:
                 last_error = exc
+                timeouts += 1
+                if timeouts >= MAX_SLOW_FAILURE_ATTEMPTS:
+                    break
             except requests.RequestException as exc:
                 raise ProviderError(f"Could not reach {self.base_url}: {exc}") from exc
             else:
-                if response.status_code in RETRY_STATUSES and attempt < MAX_RETRIES - 1:
+                slow = response.status_code in SLOW_FAILURE_STATUSES
+                budget = MAX_SLOW_FAILURE_ATTEMPTS if slow else MAX_RETRIES
+                if response.status_code in RETRY_STATUSES and attempt < budget - 1:
                     delay = _sleep_for(attempt, response.headers.get("Retry-After"))
                     response.close()
                     time.sleep(delay)
@@ -126,7 +145,18 @@ class OpenAICompatibleProvider:
             if attempt < MAX_RETRIES - 1:
                 time.sleep(_sleep_for(attempt, None))
 
-        raise ProviderError(f"Request to {self.base_url} timed out: {last_error}")
+        raise ProviderError(self._unreachable_message(payload, last_error))
+
+    def _unreachable_message(self, payload: dict[str, Any], error: Exception | None) -> str:
+        model = str(payload.get("model", ""))
+        text = (
+            f"{model} did not respond within {READ_TIMEOUT}s. "
+            "The model is listed in the catalog but its backend is not answering."
+        )
+        note = _unavailable_note(model)
+        if note:
+            text = f"{model} is not usable: {note}."
+        return text + "\nRun /model --check to see which models your key can reach."
 
     def _raise_for_status(self, response: requests.Response, payload: dict[str, Any]) -> None:
         detail = self._error_detail(response)
@@ -138,11 +168,22 @@ class OpenAICompatibleProvider:
                 f"Provider rejected the API key ({status}). {detail}\n"
                 "Check NVIDIA_API_KEY, or run /login to set a new one."
             )
+        model = str(payload.get("model", ""))
         if status == 404:
+            # NVIDIA returns 404 for models the catalog lists but the account
+            # was never granted, so say that rather than "does not exist".
             raise ProviderError(
-                f"Model {payload.get('model')!r} was not found at {self.base_url} ({detail}). "
-                "Run /model to pick an available one."
+                f"{model} is not available on your account.\n"
+                "The public catalog lists many models each key cannot reach. "
+                "Run /model --check to see yours."
             )
+        if status == 410:
+            raise ProviderError(
+                f"{model} has been retired by NVIDIA. {detail}\n"
+                "Run /model --check to pick one that still works."
+            )
+        if status in SLOW_FAILURE_STATUSES:
+            raise ProviderError(self._unreachable_message(payload, None))
         if status == 400 and "tool" in detail.lower() and payload.get("tools"):
             raise _ToolsUnsupported(detail)
         if status == 429:
@@ -379,6 +420,64 @@ class OpenAICompatibleProvider:
             for entry in body.get("data", [])
             if isinstance(entry, dict) and entry.get("id")
         )
+
+
+def check_model(
+    base_url: str,
+    api_key: str,
+    model: str,
+    *,
+    timeout: float = 25.0,
+) -> tuple[str, str]:
+    """Probe one model. Returns (status, detail).
+
+    status is "ok", "unavailable", "retired", "timeout" or "error".
+    """
+    started = time.monotonic()
+    try:
+        response = requests.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "text/event-stream",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+                "stream": True,
+            },
+            stream=True,
+            timeout=(CONNECT_TIMEOUT, timeout),
+        )
+    except requests.Timeout:
+        return "timeout", f"no response in {timeout:.0f}s"
+    except requests.RequestException as exc:
+        return "error", str(exc)[:80]
+
+    try:
+        if response.status_code == 200:
+            # The endpoint accepted the request, so the model is usable. Reading
+            # a token is only for timing; some models close the stream first.
+            try:
+                for line in response.iter_lines():
+                    if line:
+                        break
+            except requests.RequestException:
+                return "ok", "accepted"
+            return "ok", f"{time.monotonic() - started:.1f}s"
+        if response.status_code == 404:
+            return "unavailable", "not granted to this key"
+        if response.status_code == 410:
+            return "retired", "end of life"
+        if response.status_code in (401, 403):
+            return "error", "key rejected"
+        return "error", f"HTTP {response.status_code}"
+    except requests.RequestException:
+        return "timeout", "stream broke"
+    finally:
+        response.close()
 
 
 def _apply_usage(

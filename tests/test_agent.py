@@ -359,3 +359,62 @@ def test_project_memory_is_included(make_agent, workspace: Path) -> None:
     agent.run("hi")
 
     assert "Always use tabs." in provider.requests[0][0]["content"]
+
+
+# ------------------------------------------------------ empty model turns
+
+def test_empty_turn_is_retried(make_agent) -> None:
+    """NVIDIA's gateway returns a 200 with no body from time to time."""
+    agent, provider = make_agent([
+        AssistantMessage(content="", tool_calls=[]),
+        text_turn("Here is the real answer."),
+    ])
+    result = agent.run("hello")
+
+    assert result.text == "Here is the real answer."
+    assert result.reason == "done"
+    assert len(provider.requests) == 2
+    # The empty turn must not pollute the transcript.
+    assert all(m.get("content") != "" or m.get("role") != "assistant" for m in agent.messages)
+
+
+def test_repeated_empty_turns_end_the_turn_as_an_error(make_agent) -> None:
+    agent, _ = make_agent([AssistantMessage(content="") for _ in range(6)])
+    result = agent.run("hello")
+
+    assert result.reason == "empty"
+    assert result.text == ""
+
+
+def test_empty_turn_after_a_tool_call_is_retried(make_agent, workspace: Path) -> None:
+    agent, _ = make_agent([
+        tool_turn("Read", {"file_path": "app.py"}),
+        AssistantMessage(content=""),
+        text_turn("It defines add()."),
+    ])
+    result = agent.run("what is in app.py?")
+
+    assert result.reason == "done"
+    assert result.text == "It defines add()."
+
+
+def test_empty_counter_resets_between_good_turns(make_agent) -> None:
+    agent, _ = make_agent([
+        AssistantMessage(content=""),
+        tool_turn("LS", {}),
+        AssistantMessage(content=""),
+        AssistantMessage(content=""),
+        text_turn("done"),
+    ])
+    result = agent.run("look around")
+    assert result.reason == "done"
+    assert result.text == "done"
+
+
+def test_whitespace_only_turn_counts_as_empty(make_agent) -> None:
+    agent, provider = make_agent([
+        AssistantMessage(content="   \n  "),
+        text_turn("real answer"),
+    ])
+    assert agent.run("hi").text == "real answer"
+    assert len(provider.requests) == 2

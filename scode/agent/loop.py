@@ -28,6 +28,8 @@ from . import prompts
 from .context import environment_block, load_project_memory
 
 TOOL_USE_MARKER = "<tool_use>"
+# How many empty model turns to ride out before giving up on the turn.
+MAX_EMPTY_TURNS = 3
 TOOL_USE_RE = re.compile(r"<tool_use>\s*(\{.*?\})\s*</tool_use>", re.DOTALL)
 
 
@@ -105,6 +107,7 @@ class Agent:
 
     def _loop(self) -> TurnResult:
         final_text = ""
+        empty_turns = 0
         for step in range(1, self.settings.max_steps + 1):
             self._maybe_compact()
 
@@ -120,6 +123,23 @@ class Agent:
             calls = list(message.tool_calls)
             if not calls and not self._native_tools:
                 message, calls = self._extract_text_protocol_calls(message)
+
+            # NVIDIA's gateway intermittently returns a 200 with an empty body.
+            # That is not an answer, so retry instead of ending the turn silently.
+            if not calls and not message.content.strip():
+                empty_turns += 1
+                if empty_turns <= MAX_EMPTY_TURNS:
+                    self.ui.muted(
+                        f"Empty response from the model; retrying "
+                        f"({empty_turns}/{MAX_EMPTY_TURNS})."
+                    )
+                    continue
+                self.ui.error(
+                    f"The model returned an empty response {empty_turns} times in a row. "
+                    "Try again, or switch models with /model --check."
+                )
+                return TurnResult(final_text, reason="empty", steps=step)
+            empty_turns = 0
 
             self._append(message.to_message())
             if message.content.strip():

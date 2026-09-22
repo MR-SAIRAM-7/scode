@@ -118,6 +118,9 @@ def test_authorize_without_an_asker_denies(settings: Settings) -> None:
     allowed, reason = engine(settings).authorize(request())
     assert allowed is False
     assert "non-interactive" in reason
+    # The model must be told to stop retrying, or it burns steps on the same call.
+    assert "not try this call again" in reason
+    assert "Bash" in reason
 
 
 def test_authorize_asks_and_accepts_once(settings: Settings) -> None:
