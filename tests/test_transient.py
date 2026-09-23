@@ -143,7 +143,11 @@ def test_ctrl_c_during_the_wait_interrupts_the_turn(make_agent, monkeypatch: pyt
 
 def test_anthropic_overloads_and_rate_limits_are_transient() -> None:
     anthropic = pytest.importorskip("anthropic")
-    import httpx
+    # Build responses with the HTTP library this SDK version uses (httpx2 in 1.x).
+    try:
+        import httpx2 as httpx
+    except ImportError:
+        httpx = pytest.importorskip("httpx")
 
     from scode.providers.anthropic_native import AnthropicProvider
 
