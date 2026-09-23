@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,7 +10,15 @@ from conftest import FakeProvider, text_turn
 
 from scode.agent.loop import Agent
 from scode.commands import builtin as commands
-from scode.config import Settings, load_settings, user_settings_path, with_overrides
+from scode.config import (
+    Settings,
+    load_settings,
+    switch_provider,
+    user_settings_path,
+    with_overrides,
+)
+from scode.hooks import HookRunner
+from scode.mcp import McpManager
 from scode.permissions import PermissionEngine
 from scode.session.store import SessionStore
 from scode.tools import ToolContext, build_registry
@@ -27,21 +36,33 @@ class StubRepl:
     agent: Agent
     store: SessionStore
     usage: Usage
+    mcp: McpManager
+    hooks: HookRunner
     models: list[str] = field(default_factory=lambda: ["a/one", "a/two"])
+    custom_agents: dict = field(default_factory=dict)
+    custom_commands: dict = field(default_factory=dict)
     reset_called: bool = False
     resumed: str | None = None
 
     def set_model(self, model: str) -> None:
         self.settings = with_overrides(self.settings, model=model)
 
+    def set_provider(self, provider: str, model: str | None = None) -> None:
+        self.settings = switch_provider(self.settings, provider, model)
+
+    def set_effort(self, effort: str) -> None:
+        self.settings = with_overrides(self.settings, effort=effort) if effort else \
+            dataclasses.replace(self.settings, effort="")
+
     def set_mode(self, mode: str) -> None:
-        self.permissions.set_mode(mode)
+        self.agent.set_mode(mode)
 
     def set_theme(self, theme: str) -> None:
         self.settings = with_overrides(self.settings, theme=theme)
 
-    def set_api_key(self, key: str) -> None:
-        self.settings = with_overrides(self.settings, api_key=key)
+    def set_api_key(self, key: str, provider: str | None = None) -> None:
+        if provider in (None, self.settings.provider):
+            self.settings = with_overrides(self.settings, api_key=key)
 
     def reset_conversation(self) -> None:
         self.reset_called = True
@@ -69,7 +90,8 @@ def repl(workspace: Path) -> StubRepl:
         usage=usage,
     )
     store = SessionStore(workspace).open()
-    return StubRepl(settings, ui, permissions, agent, store, usage)
+    return StubRepl(settings, ui, permissions, agent, store, usage,
+                    McpManager({}, workspace), HookRunner({}, workspace))
 
 
 def run(repl: StubRepl, line: str):
@@ -158,18 +180,117 @@ def test_model_reports_a_provider_error(repl: StubRepl) -> None:
 
 # ------------------------------------------------------------------- login
 
-def test_login_saves_the_key(repl: StubRepl) -> None:
+def test_login_saves_the_key_per_provider(repl: StubRepl) -> None:
     run(repl, "/login nvapi-brand-new")
     assert repl.settings.api_key == "nvapi-brand-new"
     saved = json.loads(user_settings_path().read_text(encoding="utf-8"))
-    assert saved["api_key"] == "nvapi-brand-new"
+    assert saved["api_keys"] == {"nvidia": "nvapi-brand-new"}
+
+
+def test_login_detects_the_provider_from_the_key(repl: StubRepl) -> None:
+    run(repl, "/login sk-or-v1-abcdef")
+    saved = json.loads(user_settings_path().read_text(encoding="utf-8"))
+    assert saved["api_keys"] == {"openrouter": "sk-or-v1-abcdef"}
+    # The active provider's key is untouched.
+    assert repl.settings.api_key == "nvapi-test"
+
+
+def test_login_for_a_named_provider(repl: StubRepl) -> None:
+    run(repl, "/login anthropic sk-ant-xyz")
+    assert json.loads(user_settings_path().read_text(encoding="utf-8"))["api_keys"]["anthropic"] == "sk-ant-xyz"
 
 
 def test_logout_removes_the_key(repl: StubRepl) -> None:
     run(repl, "/login nvapi-x")
     run(repl, "/logout")
     saved = json.loads(user_settings_path().read_text(encoding="utf-8"))
-    assert "api_key" not in saved
+    assert "api_keys" not in saved
+
+
+# ------------------------------------------------------------ new commands
+
+def test_provider_lists_and_switches(repl: StubRepl) -> None:
+    assert run(repl, "/provider").exit is False
+    run(repl, "/provider openrouter")
+    assert (repl.settings.provider, repl.settings.model) == ("openrouter", "anthropic/claude-opus-5")
+    run(repl, "/provider anthropic claude-sonnet-5")
+    assert repl.settings.model == "claude-sonnet-5"
+
+
+def test_provider_switch_becomes_the_default(repl: StubRepl) -> None:
+    path = user_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"base_url": "http://old/v1", "small_model": "old/small",
+                                "theme": "light"}), encoding="utf-8")
+    run(repl, "/provider openrouter sonnet")
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    # The old provider's endpoint must not leak onto the new one; unrelated keys stay.
+    assert saved == {"provider": "openrouter", "model": "anthropic/claude-sonnet-5", "theme": "light"}
+
+    fresh = load_settings(repl.settings.workspace)
+    assert (fresh.provider, fresh.model) == ("openrouter", "anthropic/claude-sonnet-5")
+    assert fresh.base_url == "https://openrouter.ai/api/v1"
+
+
+def test_model_switch_within_a_provider_keeps_its_endpoint(repl: StubRepl) -> None:
+    path = user_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"provider": "nvidia", "base_url": "http://proxy/v1"}), encoding="utf-8")
+    run(repl, "/model nvidia/nemotron-3-ultra-550b-a55b")
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved == {"provider": "nvidia", "base_url": "http://proxy/v1",
+                     "model": "nvidia/nemotron-3-ultra-550b-a55b"}
+
+
+def test_an_unreadable_settings_file_does_not_block_a_switch(repl: StubRepl) -> None:
+    path = user_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{ broken", encoding="utf-8")
+    run(repl, "/provider openrouter")
+    assert repl.settings.provider == "openrouter"
+    assert path.read_text(encoding="utf-8") == "{ broken"
+
+
+def test_effort_sets_and_resets(repl: StubRepl) -> None:
+    run(repl, "/effort high")
+    assert repl.settings.effort == "high"
+    run(repl, "/effort nonsense")
+    assert repl.settings.effort == "high"
+    run(repl, "/effort default")
+    assert repl.settings.effort == ""
+
+
+def test_permissions_add_and_remove_rules(repl: StubRepl, workspace: Path) -> None:
+    run(repl, "/permissions allow Bash(npm test:*)")
+    local = workspace / ".scode" / "settings.local.json"
+    assert "Bash(npm test:*)" in local.read_text(encoding="utf-8")
+    from scode.permissions import Decision, PermissionRequest
+
+    request = PermissionRequest(tool="Bash", specifier="npm test --watch", title="x")
+    assert repl.permissions.check(request) is Decision.ALLOW
+    run(repl, "/permissions remove Bash(npm test:*)")
+    assert repl.permissions.check(request) is Decision.ASK
+
+
+def test_mcp_and_hooks_listings(repl: StubRepl) -> None:
+    assert run(repl, "/mcp").exit is False
+    assert run(repl, "/hooks").exit is False
+
+
+def test_bashes_with_no_shells(repl: StubRepl) -> None:
+    assert run(repl, "/bashes").exit is False
+
+
+def test_rewind_with_nothing_to_undo(repl: StubRepl) -> None:
+    assert run(repl, "/rewind").exit is False
+
+
+def test_model_check_probes_each_model(repl: StubRepl, monkeypatch) -> None:
+    probed = []
+    monkeypatch.setattr("scode.providers.registry.check_model",
+                        lambda settings, name, **k: probed.append(name) or ("ok", "0.2s"))
+    run(repl, "/model --check")
+    assert repl.settings.model in probed
 
 
 # -------------------------------------------------------------- permissions

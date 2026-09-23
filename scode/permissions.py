@@ -39,7 +39,13 @@ class Rule:
         return Rule(text, None)
 
     def matches(self, tool: str, specifier: str) -> bool:
-        if self.tool != tool and self.tool != "*":
+        # "mcp__server" covers every tool that server exposes.
+        server_wide = (
+            self.tool.startswith("mcp__")
+            and self.tool.count("__") == 1
+            and tool.startswith(self.tool + "__")
+        )
+        if self.tool != tool and self.tool != "*" and not server_wide:
             return False
         if self.pattern is None:
             return True
@@ -123,12 +129,16 @@ class PermissionEngine:
 
         return Decision.ASK
 
-    def authorize(self, request: PermissionRequest) -> tuple[bool, str]:
+    def authorize(self, request: PermissionRequest, *, force_ask: bool = False) -> tuple[bool, str]:
         """Resolve a request, prompting the user when the rules do not decide it.
 
+        `force_ask` (a hook answered "ask") prompts even where a rule would
+        allow, though deny rules and plan mode still refuse first.
         Returns (allowed, reason).
         """
         decision = self.check(request)
+        if force_ask and decision is Decision.ALLOW:
+            decision = Decision.ASK
         if decision is Decision.ALLOW:
             return True, "allowed"
         if decision is Decision.DENY:

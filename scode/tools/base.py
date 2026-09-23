@@ -22,6 +22,16 @@ class TodoItem:
 
 
 @dataclass
+class Checkpoint:
+    """A file's contents just before the agent changed it."""
+
+    turn: int
+    path: Path
+    # None when the file did not exist, so restoring means deleting it.
+    before: bytes | None
+
+
+@dataclass
 class ToolContext:
     """Everything a tool is allowed to touch."""
 
@@ -35,13 +45,28 @@ class ToolContext:
     emit: Callable[[str], None] | None = None
     # Provided by the agent loop so the Task tool can spawn subagents.
     spawn_subagent: Callable[..., str] | None = None
+    # Provided by the REPL: renders a question with options, returns answers.
+    ask_user: Callable[[str, list[dict[str, str]], bool], list[str] | None] | None = None
     # Flipped by ExitPlanMode.
     plan_submitted: str | None = None
     cancelled: Callable[[], bool] = lambda: False
+    # Snapshots taken before each edit, for /rewind. Shared with subagents.
+    checkpoints: list[Checkpoint] = field(default_factory=list)
+    turn: int = 0
+    # Background shells started with Bash(run_in_background=true).
+    shells: dict[str, Any] = field(default_factory=dict)
 
     def note(self, line: str) -> None:
         if self.emit:
             self.emit(line)
+
+    def checkpoint(self, path: Path) -> None:
+        """Remember `path` as it is now, before a write."""
+        try:
+            before = path.read_bytes() if path.is_file() else None
+        except OSError:
+            return
+        self.checkpoints.append(Checkpoint(turn=self.turn, path=path, before=before))
 
     def resolve(self, raw_path: str) -> Path:
         """Turn a user/model supplied path into an absolute path."""

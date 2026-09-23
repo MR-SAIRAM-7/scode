@@ -186,9 +186,10 @@ def test_stream_captures_reasoning_and_usage(monkeypatch: pytest.MonkeyPatch) ->
     provider = make_provider([FakeResponse(lines=lines)], monkeypatch)
     message = list(provider.stream([{"role": "user", "content": "x"}]))[-1].message
     assert message.reasoning == "thinking..."
-    assert message.input_tokens == 120
-    assert message.output_tokens == 8
+    # input_tokens excludes the cached part, as on Anthropic, so costs add up uniformly.
+    assert message.input_tokens == 80
     assert message.cached_tokens == 40
+    assert message.output_tokens == 8
 
 
 def test_stream_handles_content_parts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,14 +250,14 @@ def test_401_becomes_an_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_404_says_the_model_is_not_on_this_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """NVIDIA returns 404 for catalog models an account was never granted."""
     provider = make_provider([FakeResponse(status_code=404, body={"detail": "nope"})], monkeypatch)
-    with pytest.raises(ProviderError, match="not available on your account"):
+    with pytest.raises(ProviderError, match="not available from test"):
         provider.complete([{"role": "user", "content": "x"}])
 
 
 def test_410_reports_a_retired_model(monkeypatch: pytest.MonkeyPatch) -> None:
     body = {"detail": "The model has reached its end of life on 2026-08-26"}
     provider = make_provider([FakeResponse(status_code=410, body=body)], monkeypatch)
-    with pytest.raises(ProviderError, match="retired by NVIDIA"):
+    with pytest.raises(ProviderError, match="retired by test"):
         provider.complete([{"role": "user", "content": "x"}])
 
 

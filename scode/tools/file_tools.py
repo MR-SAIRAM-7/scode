@@ -218,6 +218,7 @@ class WriteTool(Tool):
         if existed:
             _require_prior_read(path, ctx)
 
+        ctx.checkpoint(path)
         write_text(path, content)
         _mark_read(path, ctx)
 
@@ -325,6 +326,7 @@ class EditTool(Tool):
         path, before, after = self._preview(args, ctx)
         _require_prior_read(path, ctx)
 
+        ctx.checkpoint(path)
         write_text(path, after)
         _mark_read(path, ctx)
 
@@ -420,6 +422,7 @@ class MultiEditTool(Tool):
         path, before, after = self._preview(args, ctx)
         _require_prior_read(path, ctx)
 
+        ctx.checkpoint(path)
         write_text(path, after)
         _mark_read(path, ctx)
 

@@ -151,3 +151,76 @@ class ExitPlanModeTool(Tool):
             detail=plan,
             metadata={"plan": plan},
         )
+
+
+class AskUserQuestionTool(Tool):
+    name = "AskUserQuestion"
+    description = (
+        "Ask the user one multiple-choice question when a decision is genuinely theirs: "
+        "a destructive step, an ambiguous requirement where the options lead to different "
+        "work, or a preference you can't infer. Offer 2-6 concrete options; the user can "
+        "also type their own answer. Don't use it for things you can decide or look up."
+    )
+    mutating = False
+    verb = "Asking"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "description": "The question, ending with '?'"},
+            "options": {
+                "type": "array",
+                "description": "2-6 choices",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Short choice text"},
+                        "description": {"type": "string", "description": "What choosing it means"},
+                    },
+                    "required": ["label"],
+                },
+            },
+            "multiSelect": {"type": "boolean", "description": "Allow more than one choice"},
+        },
+        "required": ["question", "options"],
+    }
+
+    def summarize_call(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        question = str(args.get("question", ""))
+        return f"AskUserQuestion({question[:60]}{'...' if len(question) > 60 else ''})"
+
+    def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        self.validate(args)
+        question = str(args["question"]).strip()
+        raw_options = args.get("options")
+        if not isinstance(raw_options, list) or not raw_options:
+            raise ToolError("options must be a non-empty array")
+        options = []
+        for entry in raw_options[:6]:
+            if isinstance(entry, dict) and str(entry.get("label", "")).strip():
+                options.append(
+                    {
+                        "label": str(entry["label"]).strip(),
+                        "description": str(entry.get("description", "")).strip(),
+                    }
+                )
+            elif isinstance(entry, str) and entry.strip():
+                options.append({"label": entry.strip(), "description": ""})
+        if len(options) < 2:
+            raise ToolError("give at least two options")
+
+        if ctx.ask_user is None:
+            return ToolResult(
+                output=(
+                    "Nobody is available to answer (non-interactive session). Proceed with "
+                    "your best judgment and state the assumption you made."
+                ),
+                display="no user available to answer",
+            )
+        answers = ctx.ask_user(question, options, bool(args.get("multiSelect")))
+        if not answers:
+            return ToolResult(
+                output="The user dismissed the question without answering. Ask what they want instead.",
+                display="dismissed",
+            )
+        joined = "; ".join(answers)
+        return ToolResult(output=f"The user answered: {joined}", display=f"answered: {joined}")

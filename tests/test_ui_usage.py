@@ -18,7 +18,8 @@ def test_usage_accumulates() -> None:
     assert usage.input_tokens == 150
     assert usage.output_tokens == 30
     assert usage.cached_tokens == 5
-    assert usage.total_tokens == 180
+    # Every token processed counts, cached prompt tokens included.
+    assert usage.total_tokens == 185
     assert usage.requests == 2
     assert usage.api_seconds == pytest.approx(1.5)
 

@@ -17,17 +17,22 @@ def repl(workspace: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(repl_module, "InputSession", lambda *a, **k: None)
 
+    # One fake stands in for every provider the session builds, tracking the model.
     provider = FakeProvider([])
-    monkeypatch.setattr(repl_module, "get_provider", lambda settings: provider)
+
+    def build(settings, *args, **kwargs):
+        provider.model = kwargs.get("model") or settings.model
+        return provider
+
+    monkeypatch.setattr("scode.runtime.build_provider", build)
 
     settings = load_settings(
         workspace,
         {"api_key": "nvapi-test", "stream": False, "permission_mode": "bypassPermissions"},
     )
     instance = repl_module.Repl(settings, UI(quiet=True))
-    instance.provider = provider
-    instance.agent.provider = provider  # type: ignore[assignment]
-    return instance
+    yield instance
+    instance.close()
 
 
 def script(repl, turns) -> FakeProvider:
@@ -191,7 +196,7 @@ def test_subagent_usage_is_merged(repl) -> None:
 def test_read_only_subagent_has_no_write_tools(repl) -> None:
     captured: dict = {}
 
-    original = repl._spawn_subagent
+    original = repl.spawn_subagent
 
     def spy(**kwargs):
         captured.update(kwargs)
@@ -215,9 +220,153 @@ def test_set_model_updates_everything(repl) -> None:
     assert repl.provider.model == "z-ai/glm-5.3"
 
 
-def test_set_mode_refreshes_the_system_prompt(repl) -> None:
+def test_set_mode_leaves_the_system_prompt_alone(repl) -> None:
+    """Mode changes are reminders: editing the prompt would reset the provider cache."""
+    before = repl.agent.messages[0]["content"]
+    provider = script(repl, [text_turn("ok")])
     repl.set_mode("plan")
-    assert "Plan mode is ON" in repl.agent.messages[0]["content"]
+    repl._dispatch("plan the change")
+    assert repl.agent.messages[0]["content"] == before
+    assert any("Plan mode is ON" in str(m.get("content")) for m in provider.requests[0])
+
+
+# ------------------------------------------------------------ new behaviour
+
+def test_shift_tab_cycles_modes(repl) -> None:
+    repl.permissions.set_mode("default")
+    seen = []
+    for _ in range(4):
+        repl._cycle_mode()
+        seen.append(repl.permissions.mode)
+    assert seen == ["acceptEdits", "plan", "default", "acceptEdits"]
+
+
+def test_hash_notes_reach_the_model_this_session(repl) -> None:
+    provider = script(repl, [text_turn("ok")])
+    repl._dispatch("#use tabs for indentation")
+    repl._dispatch("format the file")
+    assert any("use tabs for indentation" in str(m.get("content")) for m in provider.requests[0])
+
+
+def test_custom_commands_dispatch(repl, workspace: Path) -> None:
+    folder = workspace / ".scode" / "commands"
+    folder.mkdir(parents=True)
+    (folder / "explain.md").write_text("Explain $ARGUMENTS in one paragraph.", encoding="utf-8")
+    from scode.extensions import load_commands
+
+    repl.custom_commands = load_commands(workspace)
+    provider = script(repl, [text_turn("explained")])
+    repl._dispatch("/explain the agent loop")
+    assert provider.requests[0][-1]["content"] == "Explain the agent loop in one paragraph."
+
+
+def test_builtin_commands_win_over_custom_ones(repl, workspace: Path) -> None:
+    from scode.extensions import CustomCommand
+
+    repl.custom_commands = {"exit": CustomCommand("exit", "never", workspace / "x.md")}
+    assert repl._dispatch("/exit") is True
+
+
+def test_set_provider_switches_everything(repl) -> None:
+    repl.set_provider("openrouter")
+    assert repl.settings.provider == "openrouter"
+    assert repl.settings.model == "anthropic/claude-opus-5"
+    assert repl.provider.model == "anthropic/claude-opus-5"
+    assert repl.agent.settings.provider == "openrouter"
+
+
+def test_provider_colon_model_through_set_model(repl) -> None:
+    repl.set_model("anthropic:sonnet")
+    assert (repl.settings.provider, repl.settings.model) == ("anthropic", "claude-sonnet-5")
+
+
+def test_history_survives_a_provider_switch(repl, monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    provider = script(repl, [text_turn("first answer"), text_turn("second answer")])
+    repl._dispatch("hello")
+    repl.set_provider("openrouter")
+    repl._dispatch("still there?")
+    assert any(m.get("content") == "first answer" for m in provider.requests[1])
+
+
+def test_ask_user_question_uses_the_chooser(repl, monkeypatch) -> None:
+    monkeypatch.setattr("scode.repl.choose", lambda *a, **k: 1)
+    answer = repl._ask_user("Which DB?", [{"label": "Postgres"}, {"label": "SQLite"}], False)
+    assert answer == ["SQLite"]
+
+
+def test_ask_user_question_free_text(repl, monkeypatch) -> None:
+    monkeypatch.setattr("scode.repl.choose", lambda *a, **k: 2)  # "Something else"
+    monkeypatch.setattr("scode.repl.read_line", lambda prompt: "MySQL, actually")
+    assert repl._ask_user("Which DB?", [{"label": "Postgres"}, {"label": "SQLite"}], False) == ["MySQL, actually"]
+
+
+def test_custom_agent_runs_with_its_own_prompt_and_tools(repl, workspace: Path) -> None:
+    folder = workspace / ".scode" / "agents"
+    folder.mkdir(parents=True)
+    (folder / "auditor.md").write_text(
+        "---\ndescription: Audits code\ntools: Read, Grep\n---\nYou audit code for security bugs.",
+        encoding="utf-8",
+    )
+    from scode.extensions import load_agents
+
+    repl.custom_agents = load_agents(workspace)
+    provider = script(repl, [text_turn("no issues found")])
+    report = repl.spawn_subagent(prompt="audit app.py", subagent_type="auditor", read_only=False, label="audit")
+
+    assert report == "no issues found"
+    system = provider.requests[0][0]["content"]
+    assert "You audit code for security bugs." in system
+    tools = {t["function"]["name"] for t in provider.tools_seen[0]}
+    assert tools == {"Grep", "Read"}
+
+
+@pytest.mark.parametrize("spec", ["inherit", "small", "nvidia/nemotron-3-ultra-550b-a55b"])
+def test_custom_agent_model_field(repl, workspace: Path, spec: str) -> None:
+    folder = workspace / ".scode" / "agents"
+    folder.mkdir(parents=True)
+    (folder / "helper.md").write_text(f"---\nmodel: {spec}\n---\nYou help.", encoding="utf-8")
+    from scode.extensions import load_agents
+
+    repl.custom_agents = load_agents(workspace)
+    provider = script(repl, [text_turn("ok")])
+    expected = {
+        "inherit": repl.settings.model,
+        "small": repl.settings.small_model,
+    }.get(spec, spec)
+    assert repl.spawn_subagent(prompt="x", subagent_type="helper", read_only=True, label="h") == "ok"
+    assert provider.model == expected
+
+
+def test_rewind_restores_files(repl, workspace: Path) -> None:
+    script(repl, [
+        tool_turn("Read", {"file_path": "app.py"}, call_id="r"),
+        tool_turn("Edit", {"file_path": "app.py", "old_string": "a + b", "new_string": "a * b"}, call_id="e"),
+        tool_turn("Write", {"file_path": "new.py", "content": "x = 1\n"}, call_id="w"),
+        text_turn("done"),
+    ])
+    repl._dispatch("change things")
+    assert "a * b" in (workspace / "app.py").read_text(encoding="utf-8")
+
+    from scode.commands import resolve
+
+    resolve("rewind").handler(repl, "")
+    assert "a + b" in (workspace / "app.py").read_text(encoding="utf-8")
+    assert not (workspace / "new.py").exists()
+    assert not repl.agent.ctx.checkpoints
+
+
+def test_close_stops_background_shells(repl, workspace: Path) -> None:
+    import sys
+
+    from scode.tools.shell import BashTool
+
+    python = Path(sys.executable).as_posix()
+    BashTool().run({"command": f'"{python}" -c "import time; time.sleep(30)"', "run_in_background": True},
+                   repl.agent.ctx)
+    shell = repl.agent.ctx.shells["bash_1"]
+    repl.close()
+    assert shell.status in {"killed"} or shell.status.startswith("exited")
 
 
 def test_reset_conversation_starts_a_new_session(repl) -> None:
@@ -253,3 +402,12 @@ def test_set_theme_swaps_the_ui(repl) -> None:
     repl.set_theme("light")
     assert repl.settings.theme == "light"
     assert repl.agent.ui is repl.ui
+
+
+def test_switching_to_a_keyless_provider_explains_how_to_fix_it(repl, capsys) -> None:
+    repl.ui.quiet = False
+    repl.set_provider("openrouter")
+    repl._dispatch("hello")
+    out = capsys.readouterr().out
+    assert "OPENROUTER_API_KEY" in out and "/login openrouter" in out
+    assert "openrouter.ai/keys" in out

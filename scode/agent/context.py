@@ -139,14 +139,35 @@ def append_memory(workspace: Path, note: str, *, user_level: bool = False) -> Pa
 
 
 MENTION_RE = re.compile(r"(?:^|(?<=\s))@([\w./\\~-]+)")
+IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 
-def expand_file_mentions(text: str, workspace: Path) -> tuple[str, list[str]]:
-    """Inline the contents of @-mentioned files, as Claude Code does."""
+def expand_file_mentions(
+    text: str,
+    workspace: Path,
+    *,
+    allow_images: bool = True,
+) -> tuple[str | list[dict[str, str]], list[str]]:
+    """Attach @-mentioned files to a message, as Claude Code does.
+
+    Text files are inlined. Images become image parts, so the result is a
+    part list instead of a string when any image is attached.
+    """
+    import base64
+
     from ..errors import ToolError
+    from ..providers.base import image_part
     from ..tools.file_tools import read_text
 
     attached: list[str] = []
+    images: list[dict[str, str]] = []
     budget = MAX_MENTION_CHARS
 
     for match in MENTION_RE.finditer(text):
@@ -157,23 +178,36 @@ def expand_file_mentions(text: str, workspace: Path) -> tuple[str, list[str]]:
         if not candidate.is_file():
             continue
         try:
-            content = read_text(candidate)
-        except (ToolError, OSError):
-            continue
-
-        try:
             display = candidate.resolve().relative_to(workspace).as_posix()
         except ValueError:
             display = str(candidate)
 
+        media_type = IMAGE_TYPES.get(candidate.suffix.lower())
+        if media_type:
+            if not allow_images:
+                continue
+            try:
+                data = candidate.read_bytes()
+            except OSError:
+                continue
+            if len(data) > MAX_IMAGE_BYTES:
+                continue
+            images.append(image_part(media_type, base64.b64encode(data).decode("ascii")))
+            attached.append(display)
+            continue
+
+        try:
+            content = read_text(candidate)
+        except (ToolError, OSError):
+            continue
         if len(content) > budget:
             content = content[:budget] + "\n[truncated]"
         budget -= len(content)
         attached.append(display)
-        text += (
-            f"\n\n<attached path=\"{display}\">\n{content}\n</attached>"
-        )
+        text += f"\n\n<attached path=\"{display}\">\n{content}\n</attached>"
         if budget <= 0:
             break
 
+    if images:
+        return [{"type": "text", "text": text}, *images], attached
     return text, attached

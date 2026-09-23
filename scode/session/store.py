@@ -98,6 +98,9 @@ class SessionStore:
                 self._write({"type": "title", "title": self.title})
         self._write({"type": "message", "message": message, "at": time.time()})
 
+    def record_compaction(self, carrier: dict[str, Any]) -> None:
+        self._write({"type": "compaction", "message": carrier, "at": time.time()})
+
     def record_event(self, kind: str, **payload: Any) -> None:
         self._write({"type": "event", "kind": kind, "at": time.time(), **payload})
 
@@ -120,10 +123,15 @@ class SessionStore:
     def read_messages(path: Path) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         for record in _read_records(path):
-            if record.get("type") == "message":
-                message = record.get("message")
-                if isinstance(message, dict) and message.get("role"):
-                    messages.append(message)
+            kind = record.get("type")
+            message = record.get("message")
+            if not isinstance(message, dict) or not message.get("role"):
+                continue
+            if kind == "compaction":
+                # Everything before a compaction lives on only in its summary.
+                messages = [message]
+            elif kind == "message":
+                messages.append(message)
         return messages
 
     @classmethod

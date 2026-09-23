@@ -1,18 +1,35 @@
-"""Model providers."""
+"""Model providers.
 
-from .base import AssistantMessage, Provider, StreamDone, TextDelta, ToolCall, ToolCallStarted
-from .openai_compatible import OpenAICompatibleProvider, ToolsNotSupported
-from .registry import get_provider, list_catalog
+Submodules are imported lazily so that `scode.config` can use the profile
+registry without pulling in the HTTP clients (which import config back).
+"""
 
-__all__ = [
-    "AssistantMessage",
-    "OpenAICompatibleProvider",
-    "Provider",
-    "StreamDone",
-    "TextDelta",
-    "ToolCall",
-    "ToolCallStarted",
-    "ToolsNotSupported",
-    "get_provider",
-    "list_catalog",
-]
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
+
+_EXPORTS = {
+    "AssistantMessage": "base",
+    "Provider": "base",
+    "StreamDone": "base",
+    "TextDelta": "base",
+    "ToolCall": "base",
+    "ToolCallStarted": "base",
+    "OpenAICompatibleProvider": "openai_compatible",
+    "ToolsNotSupported": "openai_compatible",
+    "ProviderProfile": "profiles",
+    "BUILTIN_PROFILES": "profiles",
+    "resolve_profile": "profiles",
+    "get_provider": "registry",
+    "list_catalog": "registry",
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module 'scode.providers' has no attribute {name!r}")
+    return getattr(import_module(f"{__name__}.{module}"), name)

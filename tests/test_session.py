@@ -153,3 +153,26 @@ def test_events_are_recorded(workspace: Path) -> None:
 
 def test_session_dir_is_under_the_scode_home(workspace: Path, isolated_home: Path) -> None:
     assert isolated_home in session_dir(workspace).parents
+
+
+def test_resume_starts_from_the_last_compaction(workspace: Path) -> None:
+    with SessionStore(workspace) as store:
+        store.append({"role": "user", "content": "old request"})
+        store.append({"role": "assistant", "content": "old answer"})
+        store.record_compaction({"role": "user", "content": "<session_summary>did stuff</session_summary>"})
+        store.append({"role": "user", "content": "new request"})
+        path = store.path
+
+    messages = SessionStore.read_messages(path)
+    assert [m["content"] for m in messages] == [
+        "<session_summary>did stuff</session_summary>",
+        "new request",
+    ]
+
+
+def test_provider_state_survives_a_round_trip(workspace: Path) -> None:
+    state = {"anthropic": {"content": [{"type": "thinking", "thinking": "t", "signature": "SIG"}]}}
+    with SessionStore(workspace) as store:
+        store.append({"role": "assistant", "content": "", "provider_state": state})
+        path = store.path
+    assert SessionStore.read_messages(path)[0]["provider_state"] == state

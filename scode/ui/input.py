@@ -113,11 +113,19 @@ class InputSession:
         workspace: Path,
         commands: Callable[[], Iterable[tuple[str, str]]],
         toolbar: Callable[[], str] | None = None,
+        on_cycle_mode: Callable[[], None] | None = None,
     ) -> None:
         self.session: PromptSession[str] | None = None
         if not interactive_terminal():
             return
         bindings = KeyBindings()
+
+        if on_cycle_mode is not None:
+
+            @bindings.add(Keys.BackTab)
+            def _(event) -> None:  # noqa: ANN001 - Shift+Tab cycles the permission mode
+                on_cycle_mode()
+                event.app.invalidate()
 
         @bindings.add(Keys.Escape, Keys.Enter)
         def _(event) -> None:  # noqa: ANN001 - Esc then Enter inserts a newline
@@ -155,6 +163,11 @@ class InputSession:
             more = self.session.prompt(HTML('<prompt>. </prompt>'))
             text += more
         return text
+
+
+def read_line(prompt_text: str) -> str:
+    """One line of free text, with or without a full terminal."""
+    return _read_key(prompt_text)
 
 
 def read_plain(prompt_text: str) -> str:

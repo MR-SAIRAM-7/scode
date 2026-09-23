@@ -6,9 +6,9 @@ import os
 from pathlib import Path
 
 APP_NAME = "scode"
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
-PRODUCT_TAGLINE = "Agentic coding CLI powered by NVIDIA NIM"
+PRODUCT_TAGLINE = "Agentic coding CLI for any model provider"
 
 # ---------------------------------------------------------------- filesystem
 

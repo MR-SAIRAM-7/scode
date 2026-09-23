@@ -8,17 +8,12 @@ from ..errors import ToolError
 from .base import Tool, ToolContext, ToolResult
 
 SUBAGENT_TYPES: dict[str, str] = {
-    "general-purpose": (
-        "Handles open-ended, multi-step work with the full tool set."
-    ),
+    "general-purpose": "Handles open-ended, multi-step work with the full tool set.",
     "explore": (
-        "Read-only searcher. Use it to locate code across many files when you "
-        "only need the conclusion, not every file's contents."
+        "Read-only searcher. Use it to locate code across many files when you only need "
+        "the conclusion, not every file's contents."
     ),
-    "plan": (
-        "Read-only architect. Returns an implementation plan and the files it "
-        "would touch."
-    ),
+    "plan": "Read-only architect. Returns an implementation plan and the files it would touch.",
 }
 
 READ_ONLY_TYPES = {"explore", "plan"}
@@ -28,32 +23,33 @@ class TaskTool(Tool):
     name = "Task"
     verb = "Delegating"
     mutating = False
-    description = (
-        "Launch a subagent with its own context window for work that would "
-        "otherwise flood this conversation — broad codebase searches, or an "
-        "independent chunk of a large job. The subagent reports back once and "
-        "cannot ask follow-up questions, so give it a complete brief. Types: "
-        + "; ".join(f"{name} — {desc}" for name, desc in SUBAGENT_TYPES.items())
-    )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "description": {
-                "type": "string",
-                "description": "3-5 word label for the task",
+
+    def __init__(self, custom_agents: dict[str, str] | None = None) -> None:
+        # name -> description, custom agents first so they can shadow built-ins.
+        self.agents = {**SUBAGENT_TYPES, **(custom_agents or {})}
+        listing = "; ".join(f"{name} - {desc}" for name, desc in self.agents.items())
+        self.description = (
+            "Launch a subagent with its own context window for large, independent work "
+            "that would otherwise flood this conversation, such as a wide codebase search. "
+            "It reports back once and can't ask follow-up questions, so give it a complete "
+            f"brief. Types: {listing}"
+        )
+        self.parameters = {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "description": "3-5 word label for the task"},
+                "prompt": {
+                    "type": "string",
+                    "description": "The full, self-contained task for the subagent",
+                },
+                "subagent_type": {
+                    "type": "string",
+                    "enum": sorted(self.agents),
+                    "description": "Which subagent to run (default: general-purpose)",
+                },
             },
-            "prompt": {
-                "type": "string",
-                "description": "The full, self-contained task for the subagent",
-            },
-            "subagent_type": {
-                "type": "string",
-                "enum": list(SUBAGENT_TYPES),
-                "description": "Which subagent to run (default: general-purpose)",
-            },
-        },
-        "required": ["description", "prompt"],
-    }
+            "required": ["description", "prompt"],
+        }
 
     def summarize_call(self, args: dict[str, Any], ctx: ToolContext) -> str:
         label = str(args.get("description") or "subagent")
@@ -66,9 +62,9 @@ class TaskTool(Tool):
             raise ToolError("Subagents are not available in this context")
 
         kind = str(args.get("subagent_type") or "general-purpose")
-        if kind not in SUBAGENT_TYPES:
+        if kind not in self.agents:
             raise ToolError(
-                f"Unknown subagent_type {kind!r}. Choose from: {', '.join(SUBAGENT_TYPES)}"
+                f"Unknown subagent_type {kind!r}. Choose from: {', '.join(sorted(self.agents))}"
             )
         prompt = str(args["prompt"]).strip()
         if not prompt:

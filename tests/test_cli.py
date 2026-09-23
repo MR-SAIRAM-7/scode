@@ -91,7 +91,8 @@ def fake_provider(monkeypatch: pytest.MonkeyPatch):
     def install(turns):
         provider = FakeProvider(turns)
         holder["provider"] = provider
-        monkeypatch.setattr("scode.providers.registry.get_provider", lambda *a, **k: provider)
+        # Runtime imports build_provider directly, so patch it where it is looked up.
+        monkeypatch.setattr("scode.runtime.build_provider", lambda *a, **k: provider)
         return provider
 
     return install
@@ -241,3 +242,91 @@ def test_print_mode_still_reads_piped_stdin(workspace: Path, fake_provider, monk
     monkeypatch.setattr("sys.stdin", io.StringIO("summarise the repo"))
     main(["-C", str(workspace), "-p", "--no-stream"])
     assert "summarise the repo" in provider.requests[0][-1]["content"]
+
+
+# ------------------------------------------------------------ new flags
+
+def test_provider_and_effort_flags(workspace: Path) -> None:
+    args = parse(["-C", str(workspace), "--provider", "anthropic", "--model", "sonnet", "--effort", "low"])
+    settings = settings_from_args(args)
+    assert (settings.provider, settings.model, settings.effort) == ("anthropic", "claude-sonnet-5", "low")
+
+
+def test_claude_code_flag_spellings(workspace: Path) -> None:
+    args = parse(["-C", str(workspace), "--allowedTools", "Read", "--disallowedTools", "Bash",
+                  "--max-turns", "7", "--append-system-prompt", "Be terse."])
+    settings = settings_from_args(args)
+    assert settings.allowed_tools == ("Read",)
+    assert settings.denied_tools == ("Bash",)
+    assert settings.max_steps == 7
+    assert settings.append_system_prompt == "Be terse."
+
+
+def test_mcp_config_file(workspace: Path, tmp_path: Path) -> None:
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"mcpServers": {"fs": {"command": "npx", "args": ["x"]}}}), encoding="utf-8")
+    settings = settings_from_args(parse(["-C", str(workspace), "--mcp-config", str(config)]))
+    assert settings.mcp_servers == {"fs": {"command": "npx", "args": ["x"]}}
+
+
+def test_bad_mcp_config_is_a_config_error(workspace: Path, tmp_path: Path) -> None:
+    config = tmp_path / "bad.json"
+    config.write_text("{}", encoding="utf-8")
+    with pytest.raises(ConfigError, match="mcpServers"):
+        settings_from_args(parse(["-C", str(workspace), "--mcp-config", str(config)]))
+
+
+def test_list_providers(capsys) -> None:
+    assert main(["--list-providers"]) == 0
+    out = capsys.readouterr().out
+    for name in ("nvidia", "openrouter", "omniroute", "anthropic", "openai"):
+        assert name in out
+
+
+def test_list_providers_includes_ones_from_settings(workspace: Path, capsys) -> None:
+    (workspace / ".scode").mkdir(exist_ok=True)
+    (workspace / ".scode" / "settings.json").write_text(json.dumps({
+        "provider": "acme",
+        "providers": {"acme": {"label": "Acme gateway", "base_url": "https://acme/v1",
+                               "api_key_env": ["ACME_KEY"], "default_model": "acme-1"}},
+    }), encoding="utf-8")
+    assert main(["-C", str(workspace), "--list-providers"]) == 0
+    line = next(row for row in capsys.readouterr().out.splitlines() if "acme" in row)
+    assert line.startswith("*") and "Acme gateway" in line and "ACME_KEY" in line and "acme-1" in line
+
+
+def test_list_providers_survives_bad_settings(workspace: Path, capsys) -> None:
+    (workspace / ".scode").mkdir(exist_ok=True)
+    (workspace / ".scode" / "settings.json").write_text('{"provider": "nope"}', encoding="utf-8")
+    assert main(["-C", str(workspace), "--list-providers"]) == 0
+    captured = capsys.readouterr()
+    assert "nvidia" in captured.out and "nope" in captured.err
+
+
+def test_stream_json_emits_one_event_per_line(workspace: Path, fake_provider, capsys) -> None:
+    fake_provider([tool_turn("LS", {}), text_turn("two files")])
+    settings = load_settings(workspace, {"api_key": "nvapi-x", "stream": False})
+    code = run_print_mode(settings, UI(quiet=True), "list files", output_format="stream-json")
+    events = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+
+    assert code == 0
+    assert events[0]["type"] == "system" and events[0]["subtype"] == "init"
+    kinds = [e["type"] for e in events]
+    assert kinds[1:] == ["user", "assistant", "tool_result", "assistant", "result"]
+    assert events[2]["tool_calls"][0]["name"] == "LS"
+    assert events[-1]["result"] == "two files" and events[-1]["is_error"] is False
+
+
+def test_print_mode_resumes_a_session(workspace: Path, fake_provider) -> None:
+    from scode.session.store import SessionStore
+
+    with SessionStore(workspace) as store:
+        store.append({"role": "user", "content": "remember the number 42"})
+        store.append({"role": "assistant", "content": "noted"})
+        session_id = store.id
+
+    provider = fake_provider([text_turn("42")])
+    settings = load_settings(workspace, {"api_key": "nvapi-x", "stream": False})
+    run_print_mode(settings, UI(quiet=True), "what number?", resume=session_id)
+    sent = [m.get("content") for m in provider.requests[0]]
+    assert "remember the number 42" in sent

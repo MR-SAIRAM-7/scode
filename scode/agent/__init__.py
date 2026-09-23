@@ -1,12 +1,11 @@
 """Agent core."""
 
 from .context import environment_block, expand_file_mentions, load_project_memory
-from .loop import Agent, TurnResult, build_agent
+from .loop import Agent, TurnResult
 
 __all__ = [
     "Agent",
     "TurnResult",
-    "build_agent",
     "environment_block",
     "expand_file_mentions",
     "load_project_memory",

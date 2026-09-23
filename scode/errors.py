@@ -29,3 +29,26 @@ class PermissionDenied(ScodeError):
 
 class Interrupted(ScodeError):
     """The user interrupted the current turn (Ctrl+C / Esc)."""
+
+
+class ContextOverflow(ProviderError):
+    """The conversation no longer fits the model's context window."""
+
+
+def is_context_overflow(detail: str) -> bool:
+    """Recognise the many ways providers say the prompt is too long."""
+    text = detail.lower()
+    return any(
+        marker in text
+        for marker in (
+            "maximum context length",
+            "context length",
+            "context_length_exceeded",
+            "context window",
+            "prompt is too long",
+            "input is too long",
+            "too many tokens",
+            "reduce the length of the messages",
+            "exceeds the model's maximum",
+        )
+    )

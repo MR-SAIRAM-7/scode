@@ -85,6 +85,10 @@ class BashTool(Tool):
                 "type": "integer",
                 "description": f"Timeout in seconds (default {BASH_DEFAULT_TIMEOUT}, max {BASH_MAX_TIMEOUT})",
             },
+            "run_in_background": {
+                "type": "boolean",
+                "description": "Start it and return immediately; read output later with BashOutput",
+            },
         },
         "required": ["command"],
     }
@@ -143,6 +147,23 @@ class BashTool(Tool):
         # Stop child CLIs from trying to open pagers or editors.
         env["PAGER"] = "cat"
         env["GIT_PAGER"] = "cat"
+
+        if args.get("run_in_background"):
+            from .background import start_background
+
+            try:
+                shell = start_background(ctx, command, self.shell, env)
+            except OSError as exc:
+                raise ToolError(f"Could not start the command: {exc}") from exc
+            return ToolResult(
+                output=(
+                    f"Started in the background as {shell.id}. "
+                    f"Read its output with BashOutput(bash_id=\"{shell.id}\"); "
+                    f"stop it with KillShell(shell_id=\"{shell.id}\")."
+                ),
+                display=f"started {shell.id} in the background",
+                metadata={"shell_id": shell.id},
+            )
 
         try:
             completed = subprocess.run(
