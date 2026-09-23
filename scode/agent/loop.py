@@ -21,7 +21,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import Settings
-from ..errors import ContextOverflow, Interrupted, ProviderError, ScodeError, ToolError
+from ..errors import (
+    ContextOverflow,
+    Interrupted,
+    ProviderError,
+    ScodeError,
+    ToolError,
+    TransientProviderError,
+)
 from ..hooks import HookOutcome, HookRunner
 from ..log import get_logger
 from ..permissions import Decision
@@ -48,6 +55,9 @@ TOOL_USE_MARKER = "<tool_use>"
 TOOL_USE_RE = re.compile(r"<tool_use>\s*(\{.*?\})\s*</tool_use>", re.DOTALL)
 # How many empty model turns to ride out before giving up on the turn.
 MAX_EMPTY_TURNS = 3
+# Overloads and rate limits mid-task: wait and resend, rather than abandon the work.
+MAX_TRANSIENT_RETRIES = 3
+TRANSIENT_BACKOFF = (5.0, 10.0, 20.0)
 # How many times to ask for smaller steps after a tool call was cut off.
 MAX_TRUNCATIONS = 2
 # How many times a Stop hook may send the model back to work in one turn.
@@ -229,7 +239,7 @@ class Agent:
 
     def _loop(self) -> TurnResult:
         final_text = ""
-        empty = truncations = overflow_retries = 0
+        empty = truncations = overflow_retries = transient = 0
         step = 0
         while step < self.settings.max_steps:
             step += 1
@@ -242,6 +252,20 @@ class Agent:
             except Interrupted:
                 self._note_interrupt()
                 return TurnResult(final_text, reason="interrupted", steps=step)
+            except TransientProviderError as exc:
+                transient += 1
+                if transient > MAX_TRANSIENT_RETRIES:
+                    log.warning("giving up after %d transient failures: %s", transient - 1, exc)
+                    self.ui.error(str(exc))
+                    return TurnResult(final_text, reason="error", steps=step, error=str(exc))
+                delay = TRANSIENT_BACKOFF[min(transient, len(TRANSIENT_BACKOFF)) - 1]
+                log.info("transient failure, retry %d in %.0fs: %s", transient, delay, exc)
+                self.ui.warn(f"{exc} - retrying in {delay:.0f}s ({transient}/{MAX_TRANSIENT_RETRIES}).")
+                if not self._wait(delay):
+                    self._note_interrupt()
+                    return TurnResult(final_text, reason="interrupted", steps=step)
+                step -= 1  # a retry is not progress; don't spend the step budget on it
+                continue
             except ContextOverflow as exc:
                 if overflow_retries == 0 and len(self.messages) > 2:
                     overflow_retries += 1
@@ -255,6 +279,7 @@ class Agent:
                 self.ui.error(str(exc))
                 return TurnResult(final_text, reason="error", steps=step, error=str(exc))
 
+            transient = 0
             calls = list(message.tool_calls)
             if not calls and not self._native_tools:
                 message, calls = self._extract_text_protocol_calls(message)
@@ -334,6 +359,15 @@ class Agent:
             self.remind(f"A Stop hook asked you to keep going: {outcome.reason}")
             return True
         return False
+
+    @staticmethod
+    def _wait(seconds: float) -> bool:
+        """Pause before a retry. False when the user pressed Ctrl+C."""
+        try:
+            time.sleep(seconds)
+        except KeyboardInterrupt:
+            return False
+        return True
 
     def _note_interrupt(self) -> None:
         self._append(

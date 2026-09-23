@@ -22,7 +22,15 @@ from typing import Any
 
 import requests
 
-from ..errors import AuthError, ContextOverflow, Interrupted, ProviderError, is_context_overflow
+from ..errors import (
+    AuthError,
+    ContextOverflow,
+    Interrupted,
+    ProviderError,
+    TransientProviderError,
+    is_context_overflow,
+    is_transient,
+)
 from .base import (
     AssistantMessage,
     ReasoningDelta,
@@ -372,8 +380,21 @@ class OpenAICompatibleProvider:
                 raise _ToolsUnsupported(detail)
             raise _BadRequest(detail)
         if status == 429:
-            raise ProviderError(f"Rate limited by {self.name}. {detail}")
+            raise TransientProviderError(f"Rate limited by {self.name}. {detail}")
+        if status in (500, 529):
+            raise TransientProviderError(f"{self.name} error {status}: {detail}")
         raise ProviderError(f"{self.name} error {status}: {detail}")
+
+    def _stream_error(self, error: dict[str, Any]) -> ProviderError:
+        """An error event inside a 200 stream: gateways report overloads this way."""
+        detail = str(error.get("message") or error)
+        code = error.get("code") or error.get("type")
+        text = f"{self.name} stream error: {detail}"
+        if is_context_overflow(detail):
+            return ContextOverflow(text)
+        if is_transient(detail, code):
+            return TransientProviderError(text)
+        return ProviderError(text)
 
     @staticmethod
     def _error_detail(response: requests.Response) -> str:
@@ -469,9 +490,7 @@ class OpenAICompatibleProvider:
                     continue
 
                 if isinstance(event.get("error"), dict):
-                    raise ProviderError(
-                        f"{self.name} stream error: {event['error'].get('message', event['error'])}"
-                    )
+                    raise self._stream_error(event["error"])
                 if isinstance(event.get("usage"), dict):
                     usage = event["usage"]
 
@@ -516,7 +535,7 @@ class OpenAICompatibleProvider:
                         buffer.announced = True
                         yield ToolCallStarted(buffer.name)
         except requests.RequestException as exc:
-            raise ProviderError(f"Stream interrupted: {exc}") from exc
+            raise TransientProviderError(f"The {self.name} stream was interrupted: {exc}") from exc
         except KeyboardInterrupt:
             raise Interrupted("Interrupted during streaming") from None
         finally:

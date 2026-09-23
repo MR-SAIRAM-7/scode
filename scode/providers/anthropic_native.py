@@ -24,7 +24,15 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from ..errors import AuthError, ContextOverflow, Interrupted, ProviderError, is_context_overflow
+from ..errors import (
+    AuthError,
+    ContextOverflow,
+    Interrupted,
+    ProviderError,
+    TransientProviderError,
+    is_context_overflow,
+    is_transient,
+)
 from .base import (
     AssistantMessage,
     ReasoningDelta,
@@ -313,13 +321,17 @@ class AnthropicProvider:
         if isinstance(exc, sdk.NotFoundError):
             return ProviderError(f"{model} was not found on the Anthropic API. {detail}\nRun /model to pick one.")
         if isinstance(exc, sdk.RateLimitError):
-            return ProviderError(f"Rate limited by Anthropic. {detail}")
+            return TransientProviderError(f"Rate limited by Anthropic. {detail}")
         if isinstance(exc, sdk.BadRequestError) and is_context_overflow(detail):
             return ContextOverflow(f"The conversation is too long for {model}. {detail}")
         if isinstance(exc, sdk.APIStatusError):
             status = getattr(exc, "status_code", "?")
             if status == 529 or isinstance(exc, getattr(sdk, "OverloadedError", ())):
-                return ProviderError("Anthropic is overloaded right now. Try again shortly.")
+                return TransientProviderError("Anthropic is overloaded right now.")
+            # Error events inside a stream arrive with the stream's own status.
+            if status in (500, 502, 503, 504) or (status not in (400, 401, 403, 404, 413, 422)
+                                                  and is_transient(detail)):
+                return TransientProviderError(f"Anthropic API error {status}: {detail}")
             return ProviderError(f"Anthropic API error {status}: {detail}")
         if isinstance(exc, sdk.APIConnectionError):
             return ProviderError(f"Could not reach {self.base_url}: {detail}")
